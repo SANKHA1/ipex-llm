@@ -43,6 +43,7 @@ import torch.utils.checkpoint
 from torch.nn import CrossEntropyLoss
 from typing import Optional, Tuple, Union, List
 from ipex_llm.utils.common import invalidInputError
+from ipex_llm.transformers.models.common import merge_qkv_base
 from ipex_llm.transformers.models.utils import use_quantize_kv_cache
 from ipex_llm.transformers.kv import DynamicFp8Cache, DynamicNormalCache
 
@@ -72,8 +73,10 @@ def qwen2moe_model_forward(
     return_dict: Optional[bool] = None,
 ):
     use_cache = use_cache if use_cache is not None else self.config.use_cache
-    input = input_ids if input_ids is not None else inputs_embeds
-    use_quantize_kv = use_quantize_kv_cache(self.layers[0].mlp.shared_expert.up_proj, input)
+    inputs = input_ids if input_ids is not None else inputs_embeds
+    num_heads, num_kv_heads = self.config.num_attention_heads, self.config.num_key_value_heads
+    use_quantize_kv = use_quantize_kv_cache(self.layers[0].mlp.shared_expert.up_proj, inputs,
+                                            num_heads, num_kv_heads)
     if use_cache:
         if use_quantize_kv and not isinstance(past_key_values, DynamicFp8Cache):
             past_key_values = DynamicFp8Cache.from_legacy_cache(past_key_values)
@@ -367,26 +370,7 @@ def qwen2_moe_causal_lm_forward(
 
 
 def merge_qkv(module: torch.nn.Module):
-    if isinstance(module, Qwen2MoeAttention):
-        new_weight = torch.cat([
-            module.q_proj.weight.data,
-            module.k_proj.weight.data,
-            module.v_proj.weight.data,
-        ], dim=0)
-        new_bias = torch.cat([
-            module.q_proj.bias.data,
-            module.k_proj.bias.data,
-            module.v_proj.bias.data,
-        ], dim=-1)
-
-        qkv_proj = torch.nn.Linear(0, 0, bias=True)
-        qkv_proj.weight = torch.nn.Parameter(new_weight, requires_grad=False)
-        qkv_proj.bias = torch.nn.Parameter(new_bias, requires_grad=False)
-        qkv_proj.in_features = new_weight.size(1)
-        qkv_proj.out_features = new_weight.size(0)
-        module.qkv_proj = qkv_proj
-
-        del module.q_proj, module.k_proj, module.v_proj
+    merge_qkv_base(module, Qwen2MoeAttention)
 
 
 def qwen2moe_moeblock_forward(self, hidden_states: torch.Tensor):

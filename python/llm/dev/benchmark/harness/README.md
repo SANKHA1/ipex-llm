@@ -1,5 +1,5 @@
 # Harness Evaluation
-[Harness evaluation](https://github.com/EleutherAI/lm-evaluation-harness) allows users to eaisly get accuracy on various datasets. Here we have enabled harness evaluation with IPEX-LLM under 
+[Harness evaluation](https://github.com/EleutherAI/lm-evaluation-harness) allows users to eaisly get accuracy on various datasets. Here we have enabled harness evaluation with IPEX-LLM under
 [Open LLM Leaderboard](https://huggingface.co/spaces/HuggingFaceH4/open_llm_leaderboard) settings.
 Before running, make sure to have [ipex-llm](../../../README.md) installed.
 
@@ -53,21 +53,21 @@ AutoModelForCausalLM.from_pretrained = partial(AutoModelForCausalLM.from_pretrai
 ```
 to the following codes to load the low bit models.
 ```python
-class ModifiedAutoModelForCausalLM(AutoModelForCausalLM): 
+class ModifiedAutoModelForCausalLM(AutoModelForCausalLM):
     @classmethod
     def load_low_bit(cls,*args,**kwargs):
-        for k in ['load_in_low_bit', 'device_map', 'max_memory', 'load_in_8bit','load_in_4bit']: 
+        for k in ['load_in_low_bit', 'device_map', 'max_memory','load_in_4bit']:
         kwargs.pop(k)
     return super().load_low_bit(*args, **kwargs)
 
 AutoModelForCausalLM.from_pretrained=partial(ModifiedAutoModelForCausalLM.load_low_bit, *self.bigdl_llm_kwargs)
 ```
 ### 2.Please pass the argument `trust_remote_code=True` to allow custom code to be run.
-`lm-evaluation-harness` doesn't pass `trust_remote_code=true` argument to datasets. This may cause errors similar to the following one: 
+`lm-evaluation-harness` doesn't pass `trust_remote_code=true` argument to datasets. This may cause errors similar to the following one:
 ```
-RuntimeError: Job config of task=winogrande, precision=sym_int4 failed. 
+RuntimeError: Job config of task=winogrande, precision=sym_int4 failed.
 Error Message: The repository for winogrande contains custom code which must be executed to correctly load the dataset. You can inspect the repository content at https://hf.co/datasets/winogrande.
-please pass the argument trust_remote_code=True to allow custom code to be run. 
+please pass the argument trust_remote_code=True to allow custom code to be run.
 ```
 Please refer to these:
 
@@ -78,3 +78,8 @@ Please refer to these:
 - [Security features from the Hugging Face datasets library · Issue #1135 · EleutherAI/lm-evaluation-harness (github.com)](https://github.com/EleutherAI/lm-evaluation-harness/issues/1135#issuecomment-1961928695)
 
 You have to manually run `export HF_DATASETS_TRUST_REMOTE_CODE=1` to solve the problem.
+
+### 3.Error: xe_addons.rotary_half_inplaced(self.rotary_emb.inv_freq, position_ids,RuntimeError: unsupported dtype, only fp32 and fp16 are supported.
+This error is because `ipex-llm` currently only support models with `torch_dtype` of `fp16` or `fp32`.
+
+You can add `--model_args dtype=float16` to your command to solve this problem.

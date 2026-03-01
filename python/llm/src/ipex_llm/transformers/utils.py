@@ -92,7 +92,7 @@ def load_state_dict(checkpoint_file: Union[str, os.PathLike]):
     except Exception as e:
         invalidInputError(False,
                           f"Unable to load weights"
-                          "from pytorch checkpoint file for '{checkpoint_file}' "
+                          f"from pytorch checkpoint file for '{checkpoint_file}' "
                           f"at '{checkpoint_file}'. ")
 
 
@@ -138,52 +138,49 @@ def fix_key(key):
     return key
 
 
-def get_autocast_dtype(x):
-    if x.device.type == "xpu":
-        if torch.xpu.is_autocast_xpu_enabled():
-            return torch.xpu.get_autocast_xpu_dtype()
+def is_autocast_enabled(device_type: str):
+    if torch.__version__ >= '2.3':
+        return torch.is_autocast_enabled(device_type)
+    else:
+        if device_type == "xpu":
+            return torch.xpu.is_autocast_xpu_enabled()
+        elif device_type == "cpu":
+            return torch.is_autocast_cpu_enabled()
         else:
-            return None
-    elif x.device.type == "cpu":
-        if torch.is_autocast_cpu_enabled():
-            return torch.get_autocast_cpu_dtype()
+            invalidInputError(False,
+                              f"Device type {device_type} is not supported.")
+
+
+def get_autocast_dtype(device_type: str):
+    if torch.__version__ >= '2.3':
+        if torch.is_autocast_enabled(device_type):
+            return torch.get_autocast_dtype(device_type)
         else:
             return None
     else:
-        invalidInputError(False,
-                          f"Device {x.device} is not supported.")
+        if device_type == "xpu":
+            if torch.xpu.is_autocast_xpu_enabled():
+                return torch.xpu.get_autocast_xpu_dtype()
+            else:
+                return None
+        elif device_type == "cpu":
+            if torch.is_autocast_cpu_enabled():
+                return torch.get_autocast_cpu_dtype()
+            else:
+                return None
+        else:
+            invalidInputError(False,
+                              f"Device type {device_type} is not supported.")
 
 
-_ipex_version = None
-
-
-def get_ipex_version():
-
-    global _ipex_version
-    if _ipex_version is not None:
-        return _ipex_version
-
-    import intel_extension_for_pytorch as ipex
-    _ipex_version = ipex.__version__
-    return _ipex_version
-
-
-def get_xpu_device_type(x):
-    if x.device.type != "xpu":
-        return x.device.type
-    name = torch.xpu.get_device_name(x.device.index)
-    if name.startswith("Intel(R) Arc(TM) A"):
-        return "arc"
-    elif name.startswith("Intel(R) Arc(TM)"):
-        return "mtl"
-    elif name.startswith("Intel(R) Data Center GPU Flex"):
-        return "flex"
-    elif name.startswith("Intel(R) Data Center GPU Max"):
-        return "pvc"
-    elif name.startswith("Intel(R) UHD"):
-        return "uhd"
+def get_xpu_device_name(device: torch.device):
+    if device.type != "xpu":
+        return device.type
     else:
-        return "others"
+        # possiable device name:
+        # ["arc", "pvc", "mtl", "lnl", "bmg", "arl", "legacy", "unknown"]
+        import xe_linear
+        return xe_linear.get_xpu_device_name(device)
 
 
 def load_imatrix_data(imatrix_file):
@@ -244,6 +241,10 @@ def module_name_process(full_module_name):
     else:
         super_module_name = None
     exp_id = None
+    new_module_name = None
+    layer = None
+    cur_module = None
+    dq_idx = None
     if super_module_name == 'block_sparse_moe':
         # handle mixtral moe here
         moe_mapping = {"w1": "gate", "w2": "down", "w3": "up"}
@@ -262,11 +263,24 @@ def module_name_process(full_module_name):
             layer = module_name_list[2]
             cur_module = module_name_list[-1][:-5]
             new_module_name = '_'.join([layer, cur_module])
+        elif len(module_name_list) == 6 and 'dq' in module_name_list[-1]:
+            # for NPU dq_list linear
+            layer = module_name_list[2]
+            cur_module = module_name_list[-1]
+            try:
+                dq_idx = int(cur_module[-2:])
+            except:
+                dq_idx = int(cur_module[-1:])
+            if cur_module[0] in 'qkvo':
+                cur_module = cur_module[0]
+            elif cur_module[:2] == "up":
+                cur_module = cur_module[:2]
+            elif cur_module[:4] == "gate" or cur_module[:4] == "down":
+                cur_module = cur_module[:4]
+            new_module_name = '_'.join([layer, cur_module])
         elif len(module_name_list) == 1:
             new_module_name = module_name_list[0]
-            layer = None
-            cur_module = None
-    return new_module_name, layer, cur_module
+    return new_module_name, layer, cur_module, dq_idx
 
 
 def get_cur_qtype_and_imatrix(qtype, full_module_name, imatrix_data, model_config=None):
@@ -280,7 +294,7 @@ def get_cur_qtype_and_imatrix(qtype, full_module_name, imatrix_data, model_confi
     if qtype in [ggml_tensor_qtype["gguf_iq2_xxs"], ggml_tensor_qtype["gguf_iq2_xs"],
                  ggml_tensor_qtype["gguf_iq1_s"]]:
         # For quantization which needs importance matrix
-        new_module_name, layer, cur_module = module_name_process(full_module_name)
+        new_module_name, layer, cur_module, _ = module_name_process(full_module_name)
         # custom mixed quantization strategy
         if model_type == "mixtral":
             if cur_module == 'v':
@@ -309,7 +323,7 @@ def get_cur_qtype_and_imatrix(qtype, full_module_name, imatrix_data, model_confi
             if new_module_name == 'lm_head':
                 cur_qtype = ggml_tensor_qtype['sym_int8']
     elif qtype == ggml_tensor_qtype["q2_k"]:
-        new_module_name, layer, cur_module = module_name_process(full_module_name)
+        new_module_name, layer, cur_module, _ = module_name_process(full_module_name)
         if cur_module == 'v' or (cur_module == 'down' and int(layer) in [0, 1, 10, 11]):
             # TODO: q2_k need others k-quants type here
             cur_qtype = ggml_tensor_qtype['q2_k']
@@ -322,7 +336,7 @@ def get_cur_qtype_and_imatrix(qtype, full_module_name, imatrix_data, model_confi
                 cur_qtype = ggml_tensor_qtype['sym_int8']
     elif qtype > 100:
         # gguf mixed precision
-        new_module_name, layer, cur_module = module_name_process(full_module_name)
+        new_module_name, layer, cur_module, _ = module_name_process(full_module_name)
         num_hidden_layers = getattr(model_config, "num_hidden_layers", None)
         if qtype in [gguf_mixed_qtype["gguf_q4k_s"], gguf_mixed_qtype["gguf_q4k_m"]] and \
                 new_module_name == 'lm_head':

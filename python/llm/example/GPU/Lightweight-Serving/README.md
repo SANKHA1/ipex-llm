@@ -41,7 +41,7 @@ pip install gradio # for gradio web UI
 conda install -c conda-forge -y gperftools=2.10 # to enable tcmalloc
 
 # for glm-4v-9b
-pip install transformers==4.42.4 trl
+pip install transformers==4.42.4 "trl<0.12.0"
 
 # for internlm-xcomposer2-vl-7b
 pip install transformers==4.31.0
@@ -97,7 +97,6 @@ export ENABLE_SDP_FUSION=1
 
 ```bash
 export SYCL_CACHE_PERSISTENT=1
-export BIGDL_LLM_XMX_DISABLED=1
 ```
 
 </details>
@@ -105,24 +104,14 @@ export BIGDL_LLM_XMX_DISABLED=1
 #### 3.2 Configurations for Windows
 <details>
 
-<summary>For Intel iGPU</summary>
-
-```cmd
-set SYCL_CACHE_PERSISTENT=1
-set BIGDL_LLM_XMX_DISABLED=1
-```
-
-</details>
-
-<details>
-
-<summary>For Intel Arc™ A-Series Graphics</summary>
+<summary>For Intel iGPU and Intel Arc™ A-Series Graphics</summary>
 
 ```cmd
 set SYCL_CACHE_PERSISTENT=1
 ```
 
 </details>
+
 
 > [!NOTE]
 > For the first time that each model runs on Intel iGPU/Intel Arc™ A300-Series or Pro A60, it may take several minutes to compile.

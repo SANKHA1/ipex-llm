@@ -15,11 +15,16 @@
 #
 
 
-from .convert import ggml_convert_low_bit, get_enable_ipex
+from .convert import ggml_convert_low_bit, get_enable_ipex, convert_model_hybrid
 from .model import AutoModelForCausalLM, AutoModel, AutoModelForSeq2SeqLM, \
         AutoModelForSpeechSeq2Seq, AutoModelForQuestionAnswering, \
         AutoModelForSequenceClassification, AutoModelForMaskedLM, \
         AutoModelForNextSentencePrediction, AutoModelForMultipleChoice, \
         AutoModelForTokenClassification
+
+import transformers
+if transformers.__version__ >= '4.45.0':
+    from .model import Qwen2VLForConditionalGeneration
+
 from .modelling_bigdl import *
 from .pipeline_parallel import init_pipeline_parallel, PPModelWorker

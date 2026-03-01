@@ -4,7 +4,7 @@ In this directory, you will find examples on how you could apply IPEX-LLM INT4 o
 ## Requirements
 To run these examples with IPEX-LLM on Intel GPUs, we have some recommended requirements for your machine, please refer to [here](../../../README.md#requirements) for more information.
 
-**Important: According to Gemma2's requirement, please make sure you have installed `transformers==4.43.1` and `trl` to run the example.**
+**Important: According to Gemma2's requirement, please make sure you have installed `transformers==4.43.1` and `trl<0.12.0` to run the example.**
 
 ## Example: Predict Tokens using `generate()` API
 In the example [generate.py](./generate.py), we show a basic use case for a Gemma2 model to predict the next N tokens using `generate()` API, with IPEX-LLM INT4 optimizations on Intel GPUs.
@@ -19,7 +19,7 @@ pip install --pre --upgrade ipex-llm[xpu] --extra-index-url https://pytorch-exte
 
 # According to Gemma2's requirement, please make sure you are using a stable version of Transformers, 4.43.1 or newer.
 pip install "transformers>=4.43.1"
-pip install trl
+pip install "trl<0.12.0"
 ```
 
 #### 1.2 Installation on Windows
@@ -33,7 +33,7 @@ pip install --pre --upgrade ipex-llm[xpu] --extra-index-url https://pytorch-exte
 
 # According to Gemma2's requirement, please make sure you are using a stable version of Transformers, 4.43.1 or newer.
 pip install "transformers>=4.43.1"
-pip install trl
+pip install "trl<0.12.0"
 ```
 
 ### 2. Configures OneAPI environment variables for Linux
@@ -81,7 +81,6 @@ export ENABLE_SDP_FUSION=1
 
 ```bash
 export SYCL_CACHE_PERSISTENT=1
-export BIGDL_LLM_XMX_DISABLED=1
 ```
 
 </details>
@@ -89,24 +88,14 @@ export BIGDL_LLM_XMX_DISABLED=1
 #### 3.2 Configurations for Windows
 <details>
 
-<summary>For Intel iGPU</summary>
-
-```cmd
-set SYCL_CACHE_PERSISTENT=1
-set BIGDL_LLM_XMX_DISABLED=1
-```
-
-</details>
-
-<details>
-
-<summary>For Intel Arc™ A-Series Graphics</summary>
+<summary>For Intel iGPU and Intel Arc™ A-Series Graphics</summary>
 
 ```cmd
 set SYCL_CACHE_PERSISTENT=1
 ```
 
 </details>
+
 
 > [!NOTE]
 > For the first time that each model runs on Intel iGPU/Intel Arc™ A300-Series or Pro A60, it may take several minutes to compile.

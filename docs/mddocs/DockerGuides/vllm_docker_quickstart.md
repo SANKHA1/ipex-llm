@@ -1,352 +1,449 @@
 # vLLM Serving with IPEX-LLM on Intel GPUs via Docker
 
-This guide demonstrates how to run `vLLM` serving with `IPEX-LLM` on Intel GPUs via Docker.
+This guide provides step-by-step instructions for running `vLLM` serving with `IPEX-LLM` on Intel GPUs using Docker.
 
-## Install docker
+---
 
-Follow the instructions in this [guide](./docker_windows_gpu.md#linux) to install Docker on Linux.
+## 1. Install Docker
 
-## Pull the latest image
+Follow the instructions in [this guide](./docker_windows_gpu.md#linux) to install Docker on Linux.
 
-*Note: For running vLLM serving on Intel GPUs, you can currently use either the `intelanalytics/ipex-llm-serving-xpu:latest` or `intelanalytics/ipex-llm-serving-vllm-xpu:latest` Docker image.*
+---
 
-```bash
-# This image will be updated every day
-docker pull intelanalytics/ipex-llm-serving-xpu:latest
-```
+## 2. Prepare the Docker Image
 
-## Start Docker Container
+You can either pull a prebuilt Docker image from DockerHub, depending on your hardware platform:
 
- To map the `xpu` into the container, you need to specify `--device=/dev/dri` when booting the container. Change the `/path/to/models` to mount the models.
+* **For Intel Arc A770 GPUs**, use:
 
-```bash
-#/bin/bash
-export DOCKER_IMAGE=intelanalytics/ipex-llm-serving-xpu:latest
-export CONTAINER_NAME=ipex-llm-serving-xpu-container
-sudo docker run -itd \
-        --net=host \
-        --device=/dev/dri \
-        -v /path/to/models:/llm/models \
-        -e no_proxy=localhost,127.0.0.1 \
-        --memory="32G" \
-        --name=$CONTAINER_NAME \
-        --shm-size="16g" \
-        $DOCKER_IMAGE
-```
-
-After the container is booted, you could get into the container through `docker exec`.
-
-```bash
-docker exec -it ipex-llm-serving-xpu-container /bin/bash
-```
-
-To verify the device is successfully mapped into the container, run `sycl-ls` to check the result. In a machine with Arc A770, the sampled output is:
-
-```bash
-root@arda-arc12:/# sycl-ls
-[opencl:acc:0] Intel(R) FPGA Emulation Platform for OpenCL(TM), Intel(R) FPGA Emulation Device OpenCL 1.2  [2024.17.5.0.08_160000.xmain-hotfix]
-[opencl:cpu:1] Intel(R) OpenCL, Intel(R) Xeon(R) w5-3435X OpenCL 3.0 (Build 0) [2024.17.5.0.08_160000.xmain-hotfix]
-[opencl:gpu:2] Intel(R) OpenCL Graphics, Intel(R) Arc(TM) A770 Graphics OpenCL 3.0 NEO  [23.35.27191.9]
-[opencl:gpu:3] Intel(R) OpenCL Graphics, Intel(R) Arc(TM) A770 Graphics OpenCL 3.0 NEO  [23.35.27191.9]
-[opencl:gpu:4] Intel(R) OpenCL Graphics, Intel(R) Arc(TM) A770 Graphics OpenCL 3.0 NEO  [23.35.27191.9]
-[opencl:gpu:5] Intel(R) OpenCL Graphics, Intel(R) Arc(TM) A770 Graphics OpenCL 3.0 NEO  [23.35.27191.9]
-[ext_oneapi_level_zero:gpu:0] Intel(R) Level-Zero, Intel(R) Arc(TM) A770 Graphics 1.3 [1.3.27191]
-[ext_oneapi_level_zero:gpu:1] Intel(R) Level-Zero, Intel(R) Arc(TM) A770 Graphics 1.3 [1.3.27191]
-[ext_oneapi_level_zero:gpu:2] Intel(R) Level-Zero, Intel(R) Arc(TM) A770 Graphics 1.3 [1.3.27191]
-[ext_oneapi_level_zero:gpu:3] Intel(R) Level-Zero, Intel(R) Arc(TM) A770 Graphics 1.3 [1.3.27191]
-```
-
-## Running vLLM serving with IPEX-LLM on Intel GPU in Docker
-
-We have included multiple vLLM-related files in `/llm/`:
-
-1. `vllm_offline_inference.py`: Used for vLLM offline inference example,
-    1. Modify following parameters in LLM class(line 48):
-
-    |parameters|explanation|
-    |:---|:---|
-    |`model="YOUR_MODEL"`| the model path in docker, for example "/llm/models/Llama-2-7b-chat-hf"|
-    |`load_in_low_bit="fp8"`| model quantization accuracy, acceptable ``'sym_int4'``, ``'asym_int4'``,  ``'fp6'``, ``'fp8'``, ``'fp8_e4m3'``, ``'fp8_e5m2'``,  ``'fp16'``; ``'sym_int4'`` means symmetric int 4, ``'asym_int4'`` means asymmetric int 4, etc. Relevant low bit optimizations will be applied to the model. default is ``'fp8'``, which is the same as ``'fp8_e5m2'``|
-    |`tensor_parallel_size=1`| number of tensor parallel replicas, default is `1`|
-    |`pipeline_parallel_size=1`| number of pipeline stages, default is `1`|
-
-    2. Run the python script
-
-    ```bash
-    python vllm_offline_inference.py
-    ```
-
-    3. The expected output should be as follows:
-
-```bash
-INFO 09-25 21:37:31 gpu_executor.py:108] # GPU blocks: 747, # CPU blocks: 512
-Processed prompts: 100%|█| 4/4 [00:22<00:00,  5.59s/it, est. speed input: 1.21 toks/s, output: 2.86 toks
-Prompt: 'Hello, my name is', Generated text: ' [Your Name], and I am a member of the [Your Group Name].'
-Prompt: 'The president of the United States is', Generated text: ' the head of the executive branch and the highest-ranking official in the federal'
-Prompt: 'The capital of France is', Generated text: " Paris. It is the country's largest city and is known for its icon"
-Prompt: 'The future of AI is', Generated text: ' vast and complex, with many different areas of research and application. Here are some'
+  ```bash
+  docker pull intelanalytics/ipex-llm-serving-xpu:0.8.3-b19
   ```
 
-2. `benchmark_vllm_throughput.py`: Used for benchmarking throughput
-3. `payload-1024.lua`: Used for testing request per second using 1k-128 request
-4. `start-vllm-service.sh`: Used for template for starting vLLM service
+* **For Intel Arc BMG GPUs**, use:
 
-Before performing benchmark or starting the service, you can refer to this [section](../Quickstart/install_linux_gpu.md#runtime-configurations) to setup our recommended runtime configurations.
+  ```bash
+  docker pull intelanalytics/ipex-llm-serving-xpu:0.2.0-b2
+  ```
 
-### Serving
->
-> A script named `/llm/start-vllm-service.sh` have been included in the image for starting the service conveniently. You can tune the service using these four arguments:
+
+Or **build the image locally** from source:
+
+```bash
+cd docker/llm/serving/xpu/docker
+docker build \
+  --build-arg http_proxy=... \
+  --build-arg https_proxy=... \
+  --build-arg no_proxy=... \
+  --rm --no-cache -t vllm-serving:test .
+```
+
+---
+
+## 3. Start the Docker Container
+
+To enable GPU access, map the device by adding `--device=/dev/dri`. Replace `/path/to/models` with the path to your local model directory.
+
+```bash
+export DOCKER_IMAGE=intelanalytics/ipex-llm-serving-xpu:latest
+export CONTAINER_NAME=multi-arc-container
+
+sudo docker run -itd \
+  --net=host \
+  --privileged \
+  --device=/dev/dri \
+  -v /path/to/models:/llm/models \
+  -e no_proxy=localhost,127.0.0.1 \
+  -e http_proxy=$HTTP_PROXY \
+  -e https_proxy=$HTTPS_PROXY \
+  --name=$CONTAINER_NAME \
+  --shm-size="16g" \
+  --entrypoint /bin/bash \
+  $DOCKER_IMAGE
+```
+
+To enter the running container:
+
+```bash
+docker exec -it multi-arc-container /bin/bash
+```
+
+### Verify GPU Access
+
+Run `sycl-ls` inside the container to confirm GPU devices are visible. A successful output on a machine with Intel Arc A770 GPUs may look like:
+
+```bash
+root@ws-arc-001:/llm# sycl-ls
+[level_zero:gpu][level_zero:0] Intel(R) oneAPI Unified Runtime over Level-Zero, Intel(R) Arc(TM) A770 Graphics 12.55.8 [1.6.32224.500000]
+[level_zero:gpu][level_zero:1] Intel(R) oneAPI Unified Runtime over Level-Zero, Intel(R) Arc(TM) A770 Graphics 12.55.8 [1.6.32224.500000]
+[level_zero:gpu][level_zero:2] Intel(R) oneAPI Unified Runtime over Level-Zero, Intel(R) Arc(TM) A770 Graphics 12.55.8 [1.6.32224.500000]
+[level_zero:gpu][level_zero:3] Intel(R) oneAPI Unified Runtime over Level-Zero, Intel(R) Arc(TM) A770 Graphics 12.55.8 [1.6.32224.500000]
+[opencl:cpu][opencl:0] Intel(R) OpenCL, Intel(R) Xeon(R) w5-3435X OpenCL 3.0 (Build 0) [2024.18.12.0.05_160000]
+[opencl:gpu][opencl:1] Intel(R) OpenCL Graphics, Intel(R) Arc(TM) A770 Graphics OpenCL 3.0 NEO  [24.52.32224.5]
+[opencl:gpu][opencl:2] Intel(R) OpenCL Graphics, Intel(R) Arc(TM) A770 Graphics OpenCL 3.0 NEO  [24.52.32224.5]
+[opencl:gpu][opencl:3] Intel(R) OpenCL Graphics, Intel(R) Arc(TM) A770 Graphics OpenCL 3.0 NEO  [24.52.32224.5]
+[opencl:gpu][opencl:4] Intel(R) OpenCL Graphics, Intel(R) Arc(TM) A770 Graphics OpenCL 3.0 NEO  [24.52.32224.5]
+```
+
+---
+
+## 4. Run vLLM Serving with IPEX-LLM
+
+> [!TIP]  
+> Before running benchmarks, it's recommended to lock CPU and GPU frequencies to ensure more stable, reliable, and better performance data.
+>  
+> **Lock CPU Frequency:**  
+> Use the following command to set the minimum CPU frequency (adjust based on your CPU model):  
+>  
+> ```bash  
+> sudo cpupower frequency-set -d 3.8GHz  
+> ```  
+>  
+> **Lock GPU Frequencies:**  
+> Use these commands to lock GPU frequencies to 2400MHz:  
+>  
+> ```bash  
+> sudo xpu-smi config -d 0 -t 0 --frequencyrange 2400,2400  
+> sudo xpu-smi config -d 1 -t 0 --frequencyrange 2400,2400  
+> sudo xpu-smi config -d 2 -t 0 --frequencyrange 2400,2400  
+> sudo xpu-smi config -d 3 -t 0 --frequencyrange 2400,2400  
+> ```  
+
+
+---
+
+### Start the vLLM Service
+
+```bash
+export USE_XETLA=OFF
+export SYCL_CACHE_PERSISTENT=1
+export SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=2
+export FI_PROVIDER=shm
+export TORCH_LLM_ALLREDUCE=0
+
+export CCL_WORKER_COUNT=2        # On BMG, set CCL_WORKER_COUNT=1; otherwise, internal-oneccl will not function properly
+export CCL_ATL_TRANSPORT=ofi
+export CCL_ZE_IPC_EXCHANGE=sockets
+export CCL_ATL_SHM=1
+export CCL_SAME_STREAM=1
+export CCL_BLOCKING_WAIT=0
+# export CCL_DG2_USM=1         # Needed on Core to enable USM (Shared Memory GPUDirect). Xeon supports P2P and doesn't need this.
+
+export LOAD_IN_LOW_BIT="fp8"
+export IPEX_LLM_LOWBIT=$LOAD_IN_LOW_BIT        # Ensures low-bit info is used for MoE; otherwise, IPEX's default MoE will be used
+export VLLM_USE_V1=0        # Used to select between V0 and V1 engine
+
+source /opt/intel/1ccl-wks/setvars.sh
+
+numactl -C 0-11 python -m ipex_llm.vllm.xpu.entrypoints.openai.api_server \
+  --port 8000 \
+  --model "/llm/models/Qwen2.5-7B-Instruct/" \
+  --served-model-name "Qwen2.5-7B-Instruct" \
+  --trust-remote-code \
+  --gpu-memory-utilization "0.95" \
+  --device xpu \
+  --dtype float16 \
+  --enforce-eager \
+  --load-in-low-bit $LOAD_IN_LOW_BIT \
+  --max-model-len "2000" \
+  --max-num-batched-tokens "3000" \
+  --max-num-seqs "256" \
+  --tensor-parallel-size "2" \
+  --pipeline-parallel-size "1" \
+  --block-size 8 \
+  --distributed-executor-backend ray \
+  --disable-async-output-proc
+```
+
+#### Parameter Descriptions
 
 |parameters|explanation|
 |:---|:---|
+|`--model`| the model path in docker, for example `"/llm/models/Llama-2-7b-chat-hf"`|
+|`--served-model-name`| the model name, for example `"Llama-2-7b-chat-hf"`|
+|`--load-in-low-bit`| model quantization accuracy, acceptable ``'sym_int4'``, ``'asym_int4'``,  ``'fp6'``, ``'fp8'``, ``'fp8_e4m3'``, ``'fp8_e5m2'``,  ``'fp16'``; ``'sym_int4'`` means symmetric int 4, ``'asym_int4'`` means asymmetric int 4, etc. Relevant low bit optimizations will be applied to the model. default is ``'fp8'``, which is the same as ``'fp8_e5m2'``|
+|`--tensor-parallel-size`| number of tensor parallel replicas, default is `1`|
+|`--pipeline-parallel-size`| number of pipeline stages, default is `1`|
 |`--gpu-memory-utilization`| The fraction of GPU memory to be used for the model executor, which can range from 0 to 1. For example, a value of 0.5 would imply 50% GPU memory utilization. If unspecified, will use the default value of 0.9.|
 |`--max-model-len`| Model context length. If unspecified, will be automatically derived from the model config.|
 |`--max-num-batched-token`| Maximum number of batched tokens per iteration.|
 |`--max-num-seq`| Maximum number of sequences per iteration. Default: 256|
+|`--block-size`| vLLM block size. Set to 8 to achieve a performance boost.|
+|`--quantization`| If you want to enable low-bit quantization (e.g., AWQ or GPTQ), you can add the `--quantization` argument. The available values include `awq` and `gptq`. Note that `load_in_low_bit` should be set to `asym_int4` instead of `int4`. |
 
-#### Single card serving
 
-Here are the steps to serve on a single card.
-
-1. Modify the `model` and `served_model_name` in the script so that it fits your requirement. The `served_model_name` indicates the model name used in the API, for example:
+The script mentioned above has been included in the start-vllm-service.sh within the container. You can also modify the parameters in `/llm/start-vllm-service.sh` and start the service using the built-in script:
 
 ```bash
-model="/llm/models/Llama-2-7b-chat-hf"
-served_model_name="llama2-7b-chat"
+bash /llm/start-vllm-service.sh
 ```
 
-2. Start the service using `bash /llm/start-vllm-service.sh`, if the service have booted successfully, you should see the output similar to the following figure:
+A successful startup will show logs similar to the screenshot:
+
   <a href="https://llm-assets.readthedocs.io/en/latest/_images/start-vllm-service.png" target="_blank">
     <img src="https://llm-assets.readthedocs.io/en/latest/_images/start-vllm-service.png" width=100%; />
 
   </a>
-3. Using following curl command to test the server
+
+---
+
+## 5. Test the vLLM Service
+
+Send a test completion request using `curl`:
 
 ```bash
 curl http://localhost:8000/v1/completions \
      -H "Content-Type: application/json" \
-     -d '{"model": "llama2-7b-chat",
-          "prompt": "San Francisco is a",
-          "max_tokens": 128
+     -d '{
+           "model": "llama2-7b-chat",
+           "prompt": "San Francisco is a",
+           "max_tokens": 128
          }'
 ```
 
-The expected output should be as follows:
+---
 
-```json
-{
-    "id": "cmpl-0a86629065c3414396358743d7823385",
-    "object": "text_completion",
-    "created": 1727273935,
-    "model": "llama2-7b-chat",
-    "choices": [
-        {
-            "index": 0,
-            "text": "city that is known for its iconic landmarks, vibrant culture, and diverse neighborhoods. Here are some of the top things to do in San Francisco:. Visit Alcatraz Island: Take a ferry to the infamous former prison and experience the history of Alcatraz Island.2. Explore Golden Gate Park: This sprawling urban park is home to several museums, gardens, and the famous Japanese Tea Garden.3. Walk or Bike the Golden Gate Bridge: Take in the stunning views of the San Francisco Bay and the bridge from various v",
-            "logprobs": null,
-            "finish_reason": "length",
-            "stop_reason": null
-        }
-    ],
-    "usage": {
-        "prompt_tokens": 5,
-        "total_tokens": 133,
-        "completion_tokens": 128
-    }
-}
-```
+## 6. Benchmarking
 
-#### Multi-card serving
+If you want to run benchmarks, we recommend using the official vLLM benchmarking script to collect performance data. You can execute the following command inside the container.
 
-For larger models (greater than 10b), we need to use multiple graphics cards for deployment. In the above script(`/llm/start-vllm-service.sh`), we need to make some modifications to achieve multi-card serving.
+- --num_prompt specifies the number of concurrent requests
+- --random-input-len sets the number of input tokens
+- --random-output-len sets the number of output tokens
 
-1. **Tensor Parallel Serving**: need modify the `-tensor-parallel-size` num, for example, using 2 cards for tp serving, add following parameter:
 
 ```bash
---tensor-parallel-size 2
+python /llm/vllm/benchmarks/benchmark_serving.py \
+  --model "/llm/models/Qwen2.5-7B-Instruct" \
+  --served-model-name "Qwen2.5-7B-Instruct" \
+  --dataset-name random \
+  --trust_remote_code \
+  --ignore-eos \
+  --num_prompt $batch_size \
+  --random-input-len=$input_length \
+  --random-output-len=$output_length
 ```
 
-or shortening:
+### Sample Benchmark Output
 
-```bash
--tp 2
+```
+============ Serving Benchmark Result ============
+Successful requests:                     1
+Benchmark duration (s):                  17.06
+Total input tokens:                      1024
+Total generated tokens:                  512
+Request throughput (req/s):              0.06
+Output token throughput (tok/s):         30.01
+Total Token throughput (tok/s):          90.02
+---------------Time to First Token----------------
+Mean TTFT (ms):                          520.10
+Median TTFT (ms):                        520.10
+P99 TTFT (ms):                           520.10
+-----Time per Output Token (excl. 1st token)------
+Mean TPOT (ms):                          32.37
+Median TPOT (ms):                        32.37
+P99 TPOT (ms):                           32.37
+---------------Inter-token Latency----------------
+Mean ITL (ms):                           64.87
+Median ITL (ms):                         64.84
+P99 ITL (ms):                            66.34
+==================================================
 ```
 
-2. **Pipeline Parallel Serving**: need modify the `-pipeline-parallel-size` num, for example, using 2 cards for pp serving, add following parameter:
+## 7. Miscellaneous Tools
 
-```bash
---pipeline-parallel-size 2
-```
 
-or shortening:
 
-```bash
--pp 2
-```
+### 7.1 Offline Inference and Model Quantization (Optional) 
+<details>
+If real-time services are not required, you can choose to use offline inference for testing or evaluation. Additionally, IPEX-LLM supports various model quantization schemes (such as FP8, INT4, AWQ, GPTQ) to reduce memory usage and improve performance.
 
-3. **TP+PP Serving**: using tensor-parallel and pipline-parallel mixed, for example, if you have 4 GPUs in 2 nodes (2GPUs per node), you can set the tensor parallel size to 2 and the pipeline parallel size to 2.
+Edit the parameters of the `LLM` class in `/llm/vllm_offline_inference.py`, such as:
 
-```bash
---pipeline-parallel-size 2 \
---tensor-parallel-size 2
-```
-
-or shortening:
-
-```bash
--pp 2 \
--tp 2
-```
-
-### Quantization
-
-Quantizing model from FP16 to INT4 can effectively reduce the model size loaded into gpu memory by about 70 %. The main advantage is lower delay and memory usage.
-
-#### IPEX-LLM
-
-Two scripts are provided in the docker image for model inference.
-
-1. vllm offline inference: `vllm_offline_inference.py`
-
-> Only need change the `load_in_low_bit` value to use different quantization dtype. Commonly supported dtype containes:`sym_int4`, `fp6`, `fp8`, and `fp16`, full supported dtype refer to [load_in_low_bit](./vllm_docker_quickstart.md#running-vllm-serving-with-ipex-llm-on-intel-gpu-in-docker) in the llm class parameter table.
+**Example 1:** Standard Model + IPEX-LLM Low-bit Format
 
 ```python
-llm = LLM(model="YOUR_MODEL",
+llm = LLM(model="/llm/models/Llama-2-7b-chat-hf",
           device="xpu",
           dtype="float16",
           enforce_eager=True,
-          # Simply change here for the desired load_in_low_bit value
-          load_in_low_bit="sym_int4",
+          load_in_low_bit="sym_int4",  # Optional values: sym_int4, asym_int4, fp6, fp8, fp16
           tensor_parallel_size=1,
           trust_remote_code=True)
 ```
 
-then run
-
-```bash
-python vllm_offline_inference.py
-```
-
-2. vllm online service `start-vllm-service.sh`
-
-> To fully utilize the continuous batching feature of the vLLM, you can send requests to the service using curl or other similar methods. The requests sent to the engine will be batched at token level. Queries will be executed in the same forward step of the LLM and be removed when they are finished instead of waiting for all sequences to be finished.
-  
-Modify the `--load-in-low-bit` value to `fp6`, `fp8`, `fp8_e4m3` or `fp16`
-
-```bash
- # Change value --load-in-low-bit to [fp6, fp8, fp8_e4m3, fp16] to use different low-bit formats
-python -m ipex_llm.vllm.xpu.entrypoints.openai.api_server \
-  --served-model-name $served_model_name \
-  --port 8000 \
-  --model $model \
-  --trust-remote-code \
-  --gpu-memory-utilization 0.75 \
-  --device xpu \
-  --dtype float16 \
-  --enforce-eager \
-  --load-in-low-bit sym_int4 \
-  --max-model-len 4096 \
-  --max-num-batched-tokens 10240 \
-  --max-num-seqs 12 \
-  --tensor-parallel-size 1
-```
-  
-then run following command to start vllm service
-
-```bash
-bash start-vllm-service.sh
-```
-  
-Lastly, using curl command to send a request to service, below shows an example output using `Qwen1.5-7B-Chat` with low-bit format `sym_int4`:
-
-<a href="https://llm-assets.readthedocs.io/en/latest/_images/vllm-curl-result.png" target="_blank">
-  <img src="https://llm-assets.readthedocs.io/en/latest/_images/vllm-curl-result.png" width=100%; />
-</a>
-
-#### AWQ
-
-Use AWQ as a way to reduce memory footprint.
-
-1. First download the model after awq quantification, taking `Llama-2-7B-Chat-AWQ` as an example, download it on <https://huggingface.co/TheBloke/Llama-2-7B-Chat-AWQ>
-
-2. Change the `/llm/vllm_offline_inference.py` LLM class code block's parameters `model`, `quantization` and `load_in_low_bit`, note that `load_in_low_bit` should be set to `asym_int4` instead of `int4`:
+**Example 2:** AWQ Model (e.g., Llama-2-7B-Chat-AWQ)
 
 ```python
-llm = LLM(model="/llm/models/Llama-2-7B-chat-AWQ/",
+llm = LLM(model="/llm/models/Llama-2-7B-Chat-AWQ/",
           quantization="AWQ",
-          load_in_low_bit="asym_int4",
+          load_in_low_bit="asym_int4",  # Note: use asym_int4 here
           device="xpu",
           dtype="float16",
           enforce_eager=True,
           tensor_parallel_size=1)
 ```
 
-then run the following command
+**Example 3:** GPTQ Model (e.g., llama2-7b-chat-GPTQ)
+
+```python
+llm = LLM(model="/llm/models/llama2-7b-chat-GPTQ/",
+          quantization="GPTQ",
+          load_in_low_bit="sym_int4",  # GPTQ recommends using sym_int4
+          device="xpu",
+          dtype="float16",
+          enforce_eager=True,
+          tensor_parallel_size=1)
+```
+
+Run the command:
 
 ```bash
 python vllm_offline_inference.py
 ```
 
-3. Expected result shows as below:
+You should see output similar to the following:
+
+```plaintext
+Prompt: 'The capital of France is', Generated text: ' Paris.'
+Prompt: 'The future of AI is', Generated text: ' promising and transformative...'
+```
+</details>
+
+### 7.2. Benchmarking
+<details>
+
+#### 7.2.1 Online Benchmark through API Server
+
+To benchmark the API server and estimate TPS (transactions per second), follow these steps:
+
+1. Start the service as per the instructions in this [section](https://github.com/intel-analytics/ipex-llm/blob/main/docs/mddocs/DockerGuides/vllm_docker_quickstart.md#Serving).
+2. Run the benchmark using `vllm_online_benchmark.py`:
 
 ```bash
-2024-09-29 10:06:34,272 - INFO - Converting the current model to asym_int4 format......
-2024-09-29 10:06:34,272 - INFO - Only HuggingFace Transformers models are currently supported for further optimizations
-2024-09-29 10:06:40,080 - INFO - Only HuggingFace Transformers models are currently supported for further optimizations
-2024-09-29 10:06:41,258 - INFO - Loading model weights took 3.7381 GB
-WARNING 09-29 10:06:47 utils.py:564] Pin memory is not supported on XPU.
-INFO 09-29 10:06:47 gpu_executor.py:108] # GPU blocks: 1095, # CPU blocks: 512
-Processed prompts: 100%|████████████████████████████████████████████████████████████████████████████████████████████████████████| 4/4 [00:22<00:00,  5.67s/it, est. speed input: 1.19 toks/s, output: 2.82 toks/s]
-Prompt: 'Hello, my name is', Generated text: ' [Your Name], and I am a resident of [Your City/Town'
-Prompt: 'The president of the United States is', Generated text: ' the head of the executive branch and is one of the most powerful political figures in'
-Prompt: 'The capital of France is', Generated text: ' Paris. It is the most populous urban agglomeration in the European'
-Prompt: 'The future of AI is', Generated text: ' vast and exciting, with many potential applications across various industries. Here are'
-r
+python vllm_online_benchmark.py $model_name $max_seqs $input_length $output_length
 ```
 
-#### GPTQ
-
-Use GPTQ as a way to reduce memory footprint.
-
-1. First download the model after gptq quantification, taking `Llama-2-13B-Chat-GPTQ` as an example, download it on <https://huggingface.co/TheBloke/Llama-2-13B-chat-GPTQ>
-
-2. Change the `/llm/vllm_offline_inference` LLM class code block's parameters `model`, `quantization` and `load_in_low_bit`, note that `load_in_low_bit` should be set to `asym_int4` instead of `int4`:
-
-```python
-llm = LLM(model="/llm/models/Llama-2-7B-Chat-GPTQ/",
-          quantization="GPTQ",
-          load_in_low_bit="asym_int4",
-          device="xpu",
-          dtype="float16",
-          enforce_eager=True,
-          tensor_parallel_size=1)
-```
-
-3. Expected result shows as below:
+If `input_length` and `output_length` are not provided, the script defaults to values of 1024 and 512 tokens, respectively. The output will look something like:
 
 ```bash
-2024-10-08 10:55:18,296 - INFO - Converting the current model to asym_int4 format......
-2024-10-08 10:55:18,296 - INFO - Only HuggingFace Transformers models are currently supported for further optimizations
-2024-10-08 10:55:23,478 - INFO - Only HuggingFace Transformers models are currently supported for further optimizations
-2024-10-08 10:55:24,581 - INFO - Loading model weights took 3.7381 GB
-WARNING 10-08 10:55:31 utils.py:564] Pin memory is not supported on XPU.
-INFO 10-08 10:55:31 gpu_executor.py:108] # GPU blocks: 1095, # CPU blocks: 512
-Processed prompts:   0%|                                                          | 0/4 [00:00<?, ?it/s, est. speed input: 0.00 toks/s, output: 0.00 toks/s]Processed prompts: 100%|██████████████████████████████████████████████████| 4/4 [00:22<00:00,  5.73s/it, est. speed input: 1.18 toks/s, output: 2.79 toks/s]Prompt: 'Hello, my name is', Generated text: ' [Your Name] and I am a [Your Profession] with [Your'
-Prompt: 'The president of the United States is', Generated text: ' the head of the executive branch of the federal government and is one of the most'
-Prompt: 'The capital of France is', Generated text: ' Paris, which is located in the northern part of the country.\nwhere is'
-Prompt: 'The future of AI is', Generated text: ' vast and exciting, with many possibilities for growth and innovation. Here are'
+model_name: Qwen1.5-14B-Chat
+max_seq: 12
+Warm Up: 100%|█████████████████████████████████████████████████████| 24/24 [01:36<00:00,  4.03s/req]
+Benchmarking: 100%|████████████████████████████████████████████████| 60/60 [04:03<00:00,  4.05s/req]
+Total time for 60 requests with 12 concurrent requests: xxx seconds.
+Average response time: xxx
+Token throughput: xxx
+
+Average first token latency: xxx milliseconds.
+P90 first token latency: xxx milliseconds.
+P95 first token latency: xxx milliseconds.
+
+Average next token latency: xxx milliseconds.
+P90 next token latency: xxx milliseconds.
+P95 next token latency: xxx milliseconds.
 ```
 
-### Advanced Features
+#### 7.2.2 Online Benchmark with Multimodal Input
+
+After starting the vLLM service, you can benchmark multimodal inputs using `vllm_online_benchmark_multimodal.py`:
+
+```bash
+wget -O /llm/models/test.webp https://gd-hbimg.huaban.com/b7764d5f9c19b3e433d54ba66cce6a112050783e8182-Cjds3e_fw1200webp
+export image_url="/llm/models/test.webp"
+python vllm_online_benchmark_multimodal.py --model-name $model_name --image-url $image_url --port 8000 --max-seq 1 --input-length 512 --output-length 100
+```
+
+The `image_url` can be a local path (e.g., `/llm/xxx.jpg`) or an external URL (e.g., `"http://xxx.jpg`).
+
+The output will be similar to the example in the API benchmarking section.
+
+#### 7.2.3 Online Benchmark through wrk
+
+In the container, modify the `payload-1024.lua` to ensure the "model" attribute is correct. By default, it uses a prompt of about 1024 tokens.
+
+Then, start the benchmark using `wrk`:
+
+```bash
+cd /llm
+wrk -t12 -c12 -d15m -s payload-1024.lua http://localhost:8000/v1/completions --timeout 1h
+```
+
+#### 7.2.4 Offline Benchmark through `benchmark_vllm_throughput.py`
+
+To use the `benchmark_vllm_throughput.py` script, first download the test dataset:
+
+```bash
+wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+```
+
+Then, run the benchmark:
+
+```bash
+cd /llm/
+
+wget https://huggingface.co/datasets/anon8231489123/ShareGPT_Vicuna_unfiltered/resolve/main/ShareGPT_V3_unfiltered_cleaned_split.json
+
+export MODEL="YOUR_MODEL"
+
+python3 /llm/benchmark_vllm_throughput.py \
+    --backend vllm \
+    --dataset /llm/ShareGPT_V3_unfiltered_cleaned_split.json \
+    --model $MODEL \
+    --num-prompts 1000 \
+    --seed 42 \
+    --trust-remote-code \
+    --enforce-eager \
+    --dtype float16 \
+    --device xpu \
+    --load-in-low-bit sym_int4 \
+    --gpu-memory-utilization 0.85
+```
+</details>
+
+
+### 7.3 Automatically Launching the Service via Container
+<details>
+You can configure the container to automatically start the service with the desired model and parallel settings by using environment variables:
+
+```bash
+export DOCKER_IMAGE=intelanalytics/ipex-llm-serving-xpu:latest
+
+sudo docker run -itd \
+        --net=host \
+        --device=/dev/dri \
+        --privileged \
+        --memory="32G" \
+        --name=CONTAINER_NAME \
+        --shm-size="16g" \
+        -e MODEL_PATH="/llm/models" \
+        -e SERVED_MODEL_NAME="my_model" \
+        -e TENSOR_PARALLEL_SIZE=4 \
+        -v /home/intel/LLM/:/llm/models/ \
+        $DOCKER_IMAGE
+```
+
+* `MODEL_PATH`, `SERVED_MODEL_NAME`, and `TENSOR_PARALLEL_SIZE` control the model used and degree of parallelism.
+* Mount the model directory using `-v`.
+
+To view logs and confirm service status:
+
+```bash
+docker logs CONTAINER_NAME
+```
+</details>
+
+
+
+## 8. Advanced Features
 
 #### Multi-modal Model
 
+##### Vision model
+<details>
 vLLM serving with IPEX-LLM supports multi-modal models, such as [MiniCPM-V-2_6](https://huggingface.co/openbmb/MiniCPM-V-2_6), which can accept image and text input at the same time and respond.
 
 1. Start MiniCPM service: change the `model` and `served_model_name` value in `/llm/start-vllm-service.sh`
-
-```bash
-```
 
 2. Send request with image url and prompt text. (For successfully download image from url, you may need set `http_proxy` and `https_proxy` in docker before the vllm service started)
 
@@ -381,11 +478,147 @@ curl http://localhost:8000/v1/chat/completions \
 ```bash
 {"id":"chat-0c8ea64a2f8e42d9a8f352c160972455","object":"chat.completion","created":1728373105,"model":"MiniCPM-V-2_6","choices":[{"index":0,"message":{"role":"assistant","content":"这幅图片展示了一个小孩，可能是女孩，根据服装和发型来判断。她穿着一件有红色和白色条纹的连衣裙，一个可见的白色蝴蝶结，以及一个白色的 头饰，上面有红色的点缀。孩子右手拿着一个白色泰迪熊，泰迪熊穿着一个粉色的裙子，带有褶边，它的左脸颊上有一个红色的心形图案。背景模糊，但显示出一个自然户外的环境，可能是一个花园或庭院，有红花和石头墙。阳光照亮了整个场景，暗示这可能是正午或下午。整体氛围是欢乐和天真。","tool_calls":[]},"logprobs":null,"finish_reason":"stop","stop_reason":null}],"usage":{"prompt_tokens":225,"total_tokens":353,"completion_tokens":128}}
 ```
+</details>
 
-#### Preifx Caching[todo]
+##### Audio model
+<details>
+vLLM serving with IPEX-LLM supports multi-modal models, such as [Phi-4-multimodal-instruct](https://huggingface.co/microsoft/Phi-4-multimodal-instruct)(only offine now) and whisper series model([whisper-large-v3-turbo](https://huggingface.co/openai/whisper-large-v3-turbo) and [whisper-medium](https://huggingface.co/openai/whisper-medium)), which can accept audio input and respond text output.
+
+Offline test:
+```bash
+export VLLM_USE_V1=0
+python3 audio_language.py
+```
+
+Online test:
+1. Start vLLM service: change the `model` and `served_model_name` value in `/llm/start-vllm-service.sh`
+
+2. Download or get a audio file first.
+```python
+# python3 load.py
+from vllm.assets.audio import AudioAsset
+import soundfile as sf
+
+audio, sr = AudioAsset("winning_call").audio_and_sample_rate
+
+sf.write("output.wav", audio, sr)
+```
+
+3. Send request with audio file and prompt text(optional). 
+
+```bash
+curl http://localhost:8000/v1/audio/transcriptions \
+-H "Content-Type: multipart/form-data" \
+-F file="@/llm/models/test/output.wav" \
+-F model="whisper-large-v3-turbo"
+```
+</details>
+
+#### Preifx Caching
+<details>
+Automatic Prefix Caching (APC in short) caches the KV cache of existing queries, so that a new query can directly reuse the KV cache if it shares the same prefix with one of the existing queries, allowing the new query to skip the computation of the shared part.
+
+1. Set `enable_prefix_caching=True` in vLLM engine to enable APC. Here is an example python script to show the time reduce of APC:
+
+```python
+import time
+from vllm import SamplingParams
+from ipex_llm.vllm.xpu.engine import IPEXLLMClass as LLM
+
+
+# A prompt containing a large markdown table. The table is randomly generated by GPT-4.
+LONG_PROMPT = "You are a helpful assistant in recognizes the content of tables in markdown format. Here is a table as follows.\n# Table\n" + """
+| ID  | Name          | Age | Occupation    | Country       | Email                  | Phone Number   | Address                       |
+|-----|---------------|-----|---------------|---------------|------------------------|----------------|------------------------------|
+| 1   | John Doe      | 29  | Engineer      | USA           | john.doe@example.com   | 555-1234       | 123 Elm St, Springfield, IL  |
+| 2   | Jane Smith    | 34  | Doctor        | Canada        | jane.smith@example.com | 555-5678       | 456 Oak St, Toronto, ON      |
+| 3   | Alice Johnson | 27  | Teacher       | UK            | alice.j@example.com    | 555-8765       | 789 Pine St, London, UK      |
+| 4   | Bob Brown     | 45  | Artist        | Australia     | bob.b@example.com      | 555-4321       | 321 Maple St, Sydney, NSW    |
+| 5   | Carol White   | 31  | Scientist     | New Zealand   | carol.w@example.com    | 555-6789       | 654 Birch St, Wellington, NZ |
+| 6   | Dave Green    | 28  | Lawyer        | Ireland       | dave.g@example.com     | 555-3456       | 987 Cedar St, Dublin, IE     |
+| 7   | Emma Black    | 40  | Musician      | USA           | emma.b@example.com     | 555-1111       | 246 Ash St, New York, NY     |
+| 8   | Frank Blue    | 37  | Chef          | Canada        | frank.b@example.com    | 555-2222       | 135 Spruce St, Vancouver, BC |
+| 9   | Grace Yellow  | 50  | Engineer      | UK            | grace.y@example.com    | 555-3333       | 864 Fir St, Manchester, UK   |
+| 10  | Henry Violet  | 32  | Artist        | Australia     | henry.v@example.com    | 555-4444       | 753 Willow St, Melbourne, VIC|
+| 11  | Irene Orange  | 26  | Scientist     | New Zealand   | irene.o@example.com    | 555-5555       | 912 Poplar St, Auckland, NZ  |
+| 12  | Jack Indigo   | 38  | Teacher       | Ireland       | jack.i@example.com     | 555-6666       | 159 Elm St, Cork, IE         |
+| 13  | Karen Red     | 41  | Lawyer        | USA           | karen.r@example.com    | 555-7777       | 357 Cedar St, Boston, MA     |
+| 14  | Leo Brown     | 30  | Chef          | Canada        | leo.b@example.com      | 555-8888       | 246 Oak St, Calgary, AB      |
+| 15  | Mia Green     | 33  | Musician      | UK            | mia.g@example.com      | 555-9999       | 975 Pine St, Edinburgh, UK   |
+| 16  | Noah Yellow   | 29  | Doctor        | Australia     | noah.y@example.com     | 555-0000       | 864 Birch St, Brisbane, QLD  |
+| 17  | Olivia Blue   | 35  | Engineer      | New Zealand   | olivia.b@example.com   | 555-1212       | 753 Maple St, Hamilton, NZ   |
+| 18  | Peter Black   | 42  | Artist        | Ireland       | peter.b@example.com    | 555-3434       | 912 Fir St, Limerick, IE     |
+| 19  | Quinn White   | 28  | Scientist     | USA           | quinn.w@example.com    | 555-5656       | 159 Willow St, Seattle, WA   |
+| 20  | Rachel Red    | 31  | Teacher       | Canada        | rachel.r@example.com   | 555-7878       | 357 Poplar St, Ottawa, ON    |
+| 21  | Steve Green   | 44  | Lawyer        | UK            | steve.g@example.com    | 555-9090       | 753 Elm St, Birmingham, UK   |
+| 22  | Tina Blue     | 36  | Musician      | Australia     | tina.b@example.com     | 555-1213       | 864 Cedar St, Perth, WA      |
+| 23  | Umar Black    | 39  | Chef          | New Zealand   | umar.b@example.com     | 555-3435       | 975 Spruce St, Christchurch, NZ|
+| 24  | Victor Yellow | 43  | Engineer      | Ireland       | victor.y@example.com   | 555-5657       | 246 Willow St, Galway, IE    |
+| 25  | Wendy Orange  | 27  | Artist        | USA           | wendy.o@example.com    | 555-7879       | 135 Elm St, Denver, CO       |
+| 26  | Xavier Green  | 34  | Scientist     | Canada        | xavier.g@example.com   | 555-9091       | 357 Oak St, Montreal, QC     |
+| 27  | Yara Red      | 41  | Teacher       | UK            | yara.r@example.com     | 555-1214       | 975 Pine St, Leeds, UK       |
+| 28  | Zack Blue     | 30  | Lawyer        | Australia     | zack.b@example.com     | 555-3436       | 135 Birch St, Adelaide, SA   |
+| 29  | Amy White     | 33  | Musician      | New Zealand   | amy.w@example.com      | 555-5658       | 159 Maple St, Wellington, NZ |
+| 30  | Ben Black     | 38  | Chef          | Ireland       | ben.b@example.com      | 555-7870       | 246 Fir St, Waterford, IE    |
+"""
+
+
+def get_generation_time(llm, sampling_params, prompts):
+    # time the generation
+    start_time = time.time()
+    output = llm.generate(prompts, sampling_params=sampling_params)
+    end_time = time.time()
+    # print the output and generation time
+    print(f"Output: {output[0].outputs[0].text}")
+    print(f"Generation time: {end_time - start_time} seconds.")
+
+
+# set enable_prefix_caching=True to enable APC
+llm = LLM(model='/llm/models/Llama-2-7b-chat-hf',
+          device="xpu",
+          dtype="float16",
+          enforce_eager=True,
+          load_in_low_bit="fp8",
+          tensor_parallel_size=1,
+          max_model_len=2000,
+          max_num_batched_tokens=2000,
+          enable_prefix_caching=True)
+
+sampling_params = SamplingParams(temperature=0.8, top_p=0.95)
+
+# Querying the age of John Doe
+get_generation_time(
+        llm,
+        sampling_params,
+        LONG_PROMPT + "Question: what is the age of John Doe? Your answer: The age of John Doe is ",
+        )
+
+# Querying the age of Zack Blue
+# This query will be faster since vllm avoids computing the KV cache of LONG_PROMPT again.
+get_generation_time(
+        llm,
+        sampling_params,
+        LONG_PROMPT + "Question: what is the age of Zack Blue? Your answer: The age of Zack Blue is ",
+        )
+
+```
+
+2. Expected output is shown as below: APC greatly reduces the generation time of the question related to the same table.
+
+```bash
+INFO 10-09 15:43:21 block_manager_v1.py:247] Automatic prefix caching is enabled.
+Processed prompts: 100%|█████████████████████████████████████████████████| 1/1 [00:21<00:00, 21.97s/it, est. speed input: 84.57 toks/s, output: 0.73 toks/s]
+Output: 29.
+Question: What is the occupation of Jane Smith? Your answer
+Generation time: 21.972806453704834 seconds.
+Processed prompts: 100%|██████████████████████████████████████████████| 1/1 [00:00<00:00,  1.04it/s, est. speed input: 1929.67 toks/s, output: 16.63 toks/s]
+Output: 30.
+Generation time: 0.9657604694366455 seconds.
+```
+</details>
 
 #### LoRA Adapter
-
+<details>
 This chapter shows how to use LoRA adapters with vLLM on top of a base model. Adapters can be efficiently served on a per request basis with minimal overhead.
 
 1. Download the adapter(s) and save them locally first, for example, for `llama-2-7b`:
@@ -410,8 +643,8 @@ python -m ipex_llm.vllm.xpu.entrypoints.openai.api_server \
   --load-in-low-bit fp8 \
   --max-model-len 4096 \
   --max-num-batched-tokens 10240 \
-  --max-num-seqs 12 \
   --tensor-parallel-size 1 \
+  --distributed-executor-backend ray \
   --enable-lora \
   --lora-modules sql-lora=$SQL_LOARA
 ```
@@ -465,8 +698,167 @@ python -m ipex_llm.vllm.xpu.entrypoints.openai.api_server \
   --lora-modules sql-lora-1=$SQL_LOARA_1 sql-lora-2=$SQL_LOARA_2
 
 ```
+</details>
 
-#### Cpu Offloading[todo]
+#### OpenAI API Backend
+<details>
+vLLM Serving can be deployed as a server that implements the OpenAI API protocol. This allows vLLM to be used as backend for web applications such as [open-webui](https://github.com/open-webui/open-webui/) using OpenAI API.
+
+1. Start vLLM Serving with `api-key`, just setting any string to `api-key` in `start-vllm-service.sh`, and run it.
+
+```bash
+#!/bin/bash
+model="/llm/models/Qwen1.5-14B-Chat"
+served_model_name="Qwen1.5-14B-Chat"
+
+#export SYCL_CACHE_PERSISTENT=1
+export CCL_WORKER_COUNT=4
+export FI_PROVIDER=shm
+export CCL_ATL_TRANSPORT=ofi
+export CCL_ZE_IPC_EXCHANGE=sockets
+export CCL_ATL_SHM=1
+
+export USE_XETLA=OFF
+export SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=2
+export TORCH_LLM_ALLREDUCE=0
+
+export VLLM_USE_V1=0
+export IPEX_LLM_LOWBIT=fp8
+
+source /opt/intel/1ccl-wks/setvars.sh
+
+python -m ipex_llm.vllm.xpu.entrypoints.openai.api_server \
+  --served-model-name $served_model_name \
+  --port 8000 \
+  --model $model \
+  --trust-remote-code \
+  --gpu-memory-utilization 0.9 \
+  --device xpu \
+  --dtype float16 \
+  --enforce-eager \
+  --load-in-low-bit $IPEX_LLM_LOWBIT \
+  --max-model-len 2048 \
+  --max-num-batched-tokens 4000 \
+  --api-key <your-api-key> \
+  --tensor-parallel-size 4 \
+  --distributed-executor-backend ray
+```
+
+2. Send http request with `api-key` header to verify the model has deployed successfully.
+
+```bash
+curl http://localhost:8000/v1/completions \
+    -H "Content-Type: application/json" \
+    -H "Authorization: Bearer <your-api-key>" \
+    -d '{
+    "model": "Qwen1.5-14B-Chat",
+    "prompt": "San Francisco is a",
+    "max_tokens": 128
+    }'
+```
+
+3. Start open-webui serving with following scripts. Note that the `OPENAI_API_KEY` must be consistent with the backend value. The `<host-ip>` in `OPENAI_API_BASE_URL` is the ipv4 address of the host that starts docker. For relevant details, please refer to official document [link](https://docs.openwebui.com/#installation-for-openai-api-usage-only) of open-webui.
+
+```bash
+#!/bin/bash
+export DOCKER_IMAGE=ghcr.io/open-webui/open-webui:main
+export CONTAINER_NAME=<your-docker-container-name>
+
+docker rm -f $CONTAINER_NAME
+
+docker run -itd \
+           -p 3000:8080 \
+           -e OPENAI_API_KEY=<your-api-key> \
+           -e OPENAI_API_BASE_URL=http://<host-ip>:8000/v1 \
+           -v open-webui:/app/backend/data \
+           --name $CONTAINER_NAME \
+           --restart always $DOCKER_IMAGE  
+```
+
+Then you should start the docker on host that make sure you can visit vLLM backend serving.
+
+4. After installation, you can access Open WebUI at <http://localhost:3000>. Enjoy! 😄
+
+#### Serving with FastChat
+
+We can set up model serving using `IPEX-LLM` as backend using FastChat, the following steps gives an example of how to deploy a demo using FastChat.
+
+1. **Start the Docker Container**
+
+    Run the following command to launch a Docker container with device access:
+
+    ```bash
+    #/bin/bash
+    export DOCKER_IMAGE=intelanalytics/ipex-llm-serving-xpu:latest
+
+    sudo docker run -itd \
+            --net=host \
+            --device=/dev/dri \
+            --name=demo-container \
+            # Example: map host model directory to container
+            -v /LLM_MODELS/:/llm/models/ \  
+            --shm-size="16g" \
+            # Optional: set proxy if needed
+            -e http_proxy=... \ 
+            -e https_proxy=... \
+            -e no_proxy="127.0.0.1,localhost" \
+            --entrypoint /bin/bash \
+            $DOCKER_IMAGE
+    ```
+
+2. **Start the FastChat Service**
+
+    Enter the container and start the FastChat service:
+
+    ```bash
+    #/bin/bash
+
+    # This command assumes that you have mapped the host model directory to the container
+    # and the model directory is /llm/models/
+    # we take Yi-1.5-34B as an example, and you can replace it with your own model
+
+    ps -ef | grep "fastchat" | awk '{print $2}' | xargs kill -9
+    pip install -U gradio==4.43.0
+    
+    # start controller
+    python -m fastchat.serve.controller &
+
+    export USE_XETLA=OFF
+    export SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=2
+    
+    export TORCH_LLM_ALLREDUCE=0
+    export CCL_DG2_ALLREDUCE=1
+    # CCL needed environment variables
+    export CCL_WORKER_COUNT=4
+    # pin ccl worker to cores
+    # export CCL_WORKER_AFFINITY=32,33,34,35
+    export FI_PROVIDER=shm
+    export CCL_ATL_TRANSPORT=ofi
+    export CCL_ZE_IPC_EXCHANGE=sockets
+    export CCL_ATL_SHM=1
+    
+    source /opt/intel/1ccl-wks/setvars.sh
+    
+    python -m ipex_llm.serving.fastchat.vllm_worker \
+    --model-path /llm/models/Yi-1.5-34B \
+    --device xpu \
+    --enforce-eager \
+    --disable-async-output-proc \
+    --distributed-executor-backend ray \
+    --dtype float16 \
+    --load-in-low-bit fp8 \
+    --tensor-parallel-size 4 \
+    --gpu-memory-utilization 0.9 \
+    --max-model-len 4096 \
+    --max-num-batched-tokens 8000 &
+    
+    sleep 120
+    
+    python -m fastchat.serve.gradio_web_server &
+    ```
+
+This quick setup allows you to deploy FastChat with IPEX-LLM efficiently.
+</details>
 
 ### Validated Models List
 

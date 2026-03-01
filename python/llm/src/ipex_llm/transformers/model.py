@@ -44,7 +44,6 @@ import transformers
 from typing import List
 from unittest.mock import patch
 from transformers.configuration_utils import PretrainedConfig
-from transformers.dynamic_module_utils import get_imports
 
 from ipex_llm.ggml.quantize import ggml_tensor_qtype, gguf_mixed_qtype
 from ipex_llm.utils.common import invalidInputError
@@ -52,6 +51,7 @@ from ipex_llm.transformers.gguf.api import load_gguf_model
 
 from .utils import logger, load_state_dict
 from .utils import extract_local_archive_file, get_local_shard_files, load_imatrix_data
+from .patches import patch_flash_attn_import
 
 patched_training_mode = None
 
@@ -103,20 +103,6 @@ def save_low_bit(self, *args, **kwargs):
         self.to(origin_device)
 
 
-def _load_pre():
-    from transformers import GPTJModel
-    from ipex_llm.transformers.models.gptj import gptj_model_new_init
-    GPTJModel.__init__ = gptj_model_new_init
-
-
-def patch_flash_attn_import(filename: str) -> List[str]:
-    """Work around for https://huggingface.co/microsoft/phi-1_5/discussions/72."""
-    imports = get_imports(filename)
-    if "flash_attn" in imports:
-        imports.remove("flash_attn")
-    return imports
-
-
 class _BaseAutoModelClass:
     HF_MODEL = None
 
@@ -154,8 +140,6 @@ class _BaseAutoModelClass:
             to ``True`` when running BigDL-LLM on GPU on Windows. Default to be ``False``.
         :param disk_embedding: Whether to put the Embedding layer on disk to save memory.
             Default to be ``False``.
-        :param lightweight_bmm: Whether to replace the torch.bmm ops, may need to set it
-            to ``True`` when running BigDL-LLM on GPU on Windows. Default to be ``False``.
         :param imatrix: str value, represent filename of importance matrix pretrained on
             specific datasets for use with the improved quantization methods recently
             added to llama.cpp.
@@ -249,7 +233,6 @@ class _BaseAutoModelClass:
             optimize_model = False
             kwargs["modules_to_not_convert"] = ["lm_head"]
 
-        load_in_8bit = kwargs.pop("load_in_8bit", False)
         from ipex_llm.llm_patching import bigdl_patched
         if bigdl_patched == 'Train':
             global patched_training_mode
@@ -448,14 +431,13 @@ class _BaseAutoModelClass:
                           " please use cpu_embedding instead.", FutureWarning)
             cpu_embedding = True
         disk_embedding = kwargs.pop("disk_embedding", False)
-        lightweight_bmm = kwargs.pop("lightweight_bmm", False)
         quant_config = kwargs.pop("quantization_config", None)
         imatrix_data = kwargs.pop("imatrix_data", None)
         embedding_qtype = kwargs.pop("embedding_qtype", None)
         mixed_precision = kwargs.pop("mixed_precision", False)
         if embedding_qtype is not None:
             embedding_qtype = ggml_tensor_qtype[embedding_qtype]
-        enable_xetla = kwargs.pop("enable_xetla", False)
+        disable_optimize_pre = kwargs.pop("disable_optimize_pre", False)
         _args = copy.deepcopy(args)
         _kwargs = copy.deepcopy(kwargs)
         awq_config = None
@@ -505,7 +487,6 @@ class _BaseAutoModelClass:
         else:
             if quant_config is not None:
                 kwargs["quantization_config"] = quant_config
-            _load_pre()
             try:
                 # To handle the input CUDA setting (such as 'device_map={"":0}'), ignore it
                 kwargs.pop('device_map', None)
@@ -521,12 +502,11 @@ class _BaseAutoModelClass:
         model = ggml_convert_low_bit(model, qtype, optimize_model,
                                      modules_to_not_convert=modules_to_not_convert,
                                      cpu_embedding=cpu_embedding,
-                                     lightweight_bmm=lightweight_bmm,
                                      torch_dtype=kwargs.get("torch_dtype", 'auto'),
                                      imatrix_data=imatrix_data,
                                      embedding_qtype=embedding_qtype,
-                                     enable_xetla=enable_xetla,
-                                     mixed_precision=mixed_precision)
+                                     mixed_precision=mixed_precision,
+                                     disable_optimize_pre=disable_optimize_pre)
 
         if disk_embedding:
             from ipex_llm.transformers.embedding import DiskEmbedding
@@ -584,7 +564,6 @@ class _BaseAutoModelClass:
                           " please use cpu_embedding instead.", FutureWarning)
             cpu_embedding = True
         disk_embedding = kwargs.pop("disk_embedding", False)
-        lightweight_bmm = kwargs.pop("lightweight_bmm", False)
         # Autofactory
         trust_remote_code = kwargs.pop("trust_remote_code", None)
         kwargs_orig = copy.deepcopy(kwargs)
@@ -693,7 +672,7 @@ class _BaseAutoModelClass:
                 else:
                     invalidInputError(False,
                                       f'`torch_dtype` can be either `torch.dtype` or `"auto"`,'
-                                      'but received {torch_dtype}')
+                                      f'but received {torch_dtype}')
             dtype_orig = model_class._set_default_torch_dtype(torch_dtype)
 
         # Pretrained Model
@@ -721,7 +700,6 @@ class _BaseAutoModelClass:
         model = ggml_convert_low_bit(model, qtype, optimize_model, device=quant_device,
                                      modules_to_not_convert=modules_to_not_convert,
                                      cpu_embedding=cpu_embedding,
-                                     lightweight_bmm=lightweight_bmm,
                                      embedding_qtype=embedding_qtype, torch_dtype=torch_dtype)
 
         if is_sharded:
@@ -797,6 +775,16 @@ class _BaseAutoModelClass:
                                                                 model)
             torch.distributed.barrier()
 
+        try:
+            # add lookup_generate to loaded model
+            from .lookup import lookup_generate
+            import types
+            model.lookup_generate = types.MethodType(lookup_generate, model)
+            if model.config.model_type == "minicpmv" and hasattr(model, 'llm'):
+                model.llm.lookup_generate = types.MethodType(lookup_generate, model.llm)
+        except ImportError as e:
+            pass
+
         return model
 
 
@@ -838,3 +826,8 @@ class AutoModelForMultipleChoice(_BaseAutoModelClass):
 
 class AutoModelForTokenClassification(_BaseAutoModelClass):
     HF_Model = transformers.AutoModelForTokenClassification
+
+
+if transformers.__version__ >= '4.45.0':
+    class Qwen2VLForConditionalGeneration(_BaseAutoModelClass):
+        HF_Model = transformers.Qwen2VLForConditionalGeneration

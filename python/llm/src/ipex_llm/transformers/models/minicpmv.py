@@ -26,8 +26,9 @@ import torch
 from threading import Thread
 from typing import Optional, List
 from torch.nn.functional import linear
-from ipex_llm.transformers.models.common import merge_qkv_base
+from ipex_llm.transformers.models.common import merge_qkv_base, padding_qkv_hd
 from ipex_llm.transformers.models.common import attention_softmax
+from ipex_llm.transformers.models.common import scaled_dot_product_attention
 from transformers import AutoProcessor, TextIteratorStreamer
 from transformers.generation.logits_process import RepetitionPenaltyLogitsProcessor
 
@@ -35,6 +36,7 @@ from transformers.generation.logits_process import RepetitionPenaltyLogitsProces
 # MiniCPM-V-2_5 and MiniCPM-V-2_6
 def merge_qkv(module: torch.nn.Module):
     merge_qkv_base(module, "SiglipAttention")
+    merge_qkv_base(module, "SiglipSdpaAttention")
     merge_qkv_base(module, "Idefics2VisionAttention")
 
 
@@ -52,14 +54,33 @@ def siglip_attention_forward(
     qkv = qkv.transpose(1, 2)
     query_states, key_states, value_states = qkv.chunk(3, dim=1)
 
-    attn_weights = torch.matmul(query_states * self.scale, key_states.transpose(2, 3))
-    if attention_mask is not None:
-        attn_weights = attn_weights + attention_mask
+    from ipex_llm.transformers.utils import get_xpu_device_name
+    if (
+        self.head_dim == 72
+        and get_xpu_device_name(query_states.device) == "arc" and
+        query_states.dtype in [torch.float, torch.half]
+    ):
+        n_heads, kv_length = query_states.size(1), key_states.size(2)
+        from ipex_llm.transformers.models.common import prepare_mask
+        attention_mask = prepare_mask(attention_mask, bsz, n_heads, q_len, kv_length,
+                                      False, query_states.dtype, query_states.device)
+        import xe_addons
+        attn_weights = None
+        attn_output = xe_addons.siglip_sdp_non_causal(query_states, key_states,
+                                                      value_states, attention_mask)
+    else:
+        query_states, key_states, value_states = padding_qkv_hd(
+            query_states, key_states, value_states,
+            72, 80
+        )
 
-    attn_weights = attention_softmax(attn_weights, self.training)
+        attn_weights = None
+        attn_output = scaled_dot_product_attention(
+            query_states, key_states.contiguous(), value_states.contiguous(),
+            attention_mask, False, 1 / math.sqrt(self.head_dim)
+        )
 
-    attn_weights = torch.nn.functional.dropout(attn_weights, p=self.dropout, training=self.training)
-    attn_output = torch.matmul(attn_weights, value_states)
+        attn_output = attn_output[:, :, :, :self.head_dim]
 
     attn_output = attn_output.transpose(1, 2).contiguous()
     attn_output = attn_output.reshape(bsz, q_len, self.embed_dim)
@@ -161,7 +182,7 @@ def vision_transformer_attention_forward(self, x: torch.Tensor) -> torch.Tensor:
     query_states, key_states, value_states = qkv.chunk(3, dim=1)
 
     attn_weights = torch.matmul(query_states * self.scale, key_states.transpose(2, 3))
-    attn_weights = attention_softmax(attn_weights, self.training)
+    attn_weights = attention_softmax(attn_weights)
     attn_weights = self.attn_drop(attn_weights)
     attn_output = torch.matmul(attn_weights, value_states)
 

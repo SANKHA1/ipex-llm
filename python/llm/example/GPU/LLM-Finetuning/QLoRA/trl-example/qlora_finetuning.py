@@ -18,7 +18,7 @@ import torch
 import os
 
 import transformers
-from transformers import LlamaTokenizer
+from transformers import AutoTokenizer
 from peft import LoraConfig
 from transformers import BitsAndBytesConfig
 from ipex_llm.transformers.qlora import get_peft_model, prepare_model_for_kbit_training
@@ -44,13 +44,16 @@ if __name__ == "__main__":
     args = parser.parse_args()
     model_path = args.repo_id_or_model_path
     dataset_path = args.dataset
-    tokenizer = LlamaTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
+    # Avoid tokenizer doesn't have a padding token
+    if tokenizer.pad_token is None:
+        tokenizer.pad_token = tokenizer.eos_token
 
     if dataset_path.endswith(".json") or dataset_path.endswith(".jsonl"):
         data = load_dataset("json", data_files=dataset_path)
     else:
         data = load_dataset(dataset_path)
-    
+
     # For illustration purpose, only use part of data to train
     data = data["train"].train_test_split(train_size=0.1, shuffle=False)
 
@@ -79,11 +82,11 @@ if __name__ == "__main__":
     # it will slowdown the training speed
     model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
     config = LoraConfig(
-        r=8, 
-        lora_alpha=32, 
-        target_modules=["q_proj", "k_proj", "v_proj"], 
-        lora_dropout=0.05, 
-        bias="none", 
+        r=8,
+        lora_alpha=32,
+        target_modules=["q_proj", "k_proj", "v_proj"],
+        lora_dropout=0.05,
+        bias="none",
         task_type="CAUSAL_LM",
     )
     model = get_peft_model(model, config)
@@ -105,6 +108,9 @@ if __name__ == "__main__":
             gradient_checkpointing=True, # can further reduce memory but slower
         ),
         dataset_text_field="instruction",
+        data_collator=transformers.DataCollatorForSeq2Seq(
+            tokenizer, pad_to_multiple_of=8, return_tensors="pt", padding=True
+        ),
     )
     model.config.use_cache = False  # silence the warnings. Please re-enable for inference!
     result = trainer.train()

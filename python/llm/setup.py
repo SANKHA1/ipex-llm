@@ -46,11 +46,12 @@ exclude_patterns = ["*__pycache__*", "*ipynb_checkpoints*"]
 IPEX_LLM_PYTHON_HOME = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 VERSION = open(os.path.join(IPEX_LLM_PYTHON_HOME,
                './llm/version.txt'), 'r').read().strip()
-CORE_XE_VERSION = VERSION.replace("2.2.0", "2.6.0")
+CORE_XE_VERSION = VERSION.replace("2.3.0", "2.7.0")
 llm_home = os.path.join(os.path.dirname(os.path.abspath(__file__)), "src")
 github_artifact_dir = os.path.join(llm_home, '../llm-binary')
 libs_dir = os.path.join(llm_home, "ipex_llm", "libs")
 
+COMMON_DEP = ["setuptools"]
 cpu_torch_version = ["torch==2.1.2+cpu;platform_system=='Linux'", "torch==2.1.2;platform_system=='Windows'"]
 CONVERT_DEP = ['numpy == 1.26.4', # lastet 2.0.0b1 will cause error
                'transformers == 4.37.0', 'sentencepiece', 'tokenizers == 0.15.2',
@@ -85,7 +86,8 @@ windows_binarys = [
     "quantize-llama_vnni.exe",
     "quantize-gptneox_vnni.exe",
     "quantize-bloom_vnni.exe",
-    "quantize-starcoder_vnni.exe"
+    "quantize-starcoder_vnni.exe",
+    "pipeline.dll"
 ]
 linux_binarys = [
     "libllama_avx.so",
@@ -264,26 +266,26 @@ def setup_package():
                     'mpmath==1.3.0' # fix AttributeError: module 'mpmath' has no attribute 'rational'
                     ]
     all_requires += CONVERT_DEP
+    all_requires += COMMON_DEP
 
     # Add internal requires for llama-index
     llama_index_requires = copy.deepcopy(all_requires)
     for exclude_require in cpu_torch_version:
         llama_index_requires.remove(exclude_require)
+    llama_index_requires.remove("setuptools")
     llama_index_requires += ["setuptools<70.0.0"]
     llama_index_requires += ["torch<2.2.0",
                              "sentence-transformers~=2.6.1"]
 
 
     oneapi_2024_0_requires = ["dpcpp-cpp-rt==2024.0.2;platform_system=='Windows'",
-                              "mkl-dpcpp==2024.0.0;platform_system=='Windows'",
-                              "onednn==2024.0.0;platform_system=='Windows'"]
-    oneapi_2024_2_requires = ["dpcpp-cpp-rt==2024.2.1;platform_system=='Windows'",
-                              "mkl-dpcpp==2024.2.1;platform_system=='Windows'",
-                              "onednn==2024.2.1;platform_system=='Windows'"]
+                              "mkl-dpcpp==2024.0.0;platform_system=='Windows'"]
+
     # Linux install with --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us/
     xpu_21_requires = copy.deepcopy(all_requires)
     for exclude_require in cpu_torch_version:
         xpu_21_requires.remove(exclude_require)
+    xpu_21_requires.remove("setuptools")
     xpu_21_requires += ["setuptools<70.0.0"]
     xpu_21_requires += ["torch==2.1.0a0",
                         "torchvision==0.16.0a0",
@@ -294,23 +296,44 @@ def setup_package():
     xpu_21_requires += oneapi_2024_0_requires
     # default to ipex 2.1 for linux and windows
     xpu_requires = copy.deepcopy(xpu_21_requires)
-
-    xpu_lnl_requires = copy.deepcopy(all_requires)
+    
+    xpu_26_requires = copy.deepcopy(all_requires)
     for exclude_require in cpu_torch_version:
-        xpu_lnl_requires.remove(exclude_require)
-    xpu_lnl_requires += ["torch==2.3.1+cxx11.abi",
-                         "torchvision==0.18.1+cxx11.abi",
-                         "intel-extension-for-pytorch==2.3.110+xpu",
-                         "bigdl-core-xe-23==" + CORE_XE_VERSION,
-                         "bigdl-core-xe-batch-23==" + CORE_XE_VERSION,
-                         "bigdl-core-xe-addons-23==" + CORE_XE_VERSION]
+        xpu_26_requires.remove(exclude_require)
+    xpu_26_requires += ["torch==2.6.0+xpu",
+                        "torchvision==0.21.0+xpu",
+                        "torchaudio==2.6.0+xpu",
+                        "bigdl-core-xe-all==" + CORE_XE_VERSION,
+                        "onednn-devel==2025.0.1;platform_system=='Windows'",
+                        "onednn==2025.0.1;platform_system=='Windows'",
+                        "dpcpp-cpp-rt==2025.0.2"]
+
+    # Add for testing purposes for now, for Arrow Lake-H with AOT on Windows
+    # Linux keeps the same as xpu_2.6
+    xpu_26_arl_requires = copy.deepcopy(all_requires)
+    for exclude_require in cpu_torch_version:
+        xpu_26_arl_requires.remove(exclude_require)
+    xpu_26_arl_requires += ["torch==2.6.0.post0+xpu;platform_system=='Windows'",
+                            "torchvision==0.21.0.post0+xpu;platform_system=='Windows'",
+                            "torchaudio==2.6.0.post0+xpu;platform_system=='Windows'",
+                            "torch==2.6.0+xpu;platform_system=='Linux'",
+                            "torchvision==0.21.0+xpu;platform_system=='Linux'",
+                            "torchaudio==2.6.0+xpu;platform_system=='Linux'",
+                            "bigdl-core-xe-all==" + CORE_XE_VERSION,
+                            "onednn-devel==2025.0.1;platform_system=='Windows'",
+                            "onednn==2025.0.1;platform_system=='Windows'",
+                            "dpcpp-cpp-rt==2025.0.2"]
 
     cpp_requires = ["bigdl-core-cpp==" + CORE_XE_VERSION,
-                    "onednn-devel==2024.2.1;platform_system=='Windows'"]
-    cpp_requires += oneapi_2024_2_requires
+                    "onednn-devel==2025.0.1;platform_system=='Windows'",
+                    "onednn==2025.0.1;platform_system=='Windows'",
+                    "dpcpp-cpp-rt==2025.0.2;platform_system=='Windows'",
+                    "mkl-dpcpp==2025.0.1;platform_system=='Windows'"]
+    cpp_requires += COMMON_DEP
 
     serving_requires = ['py-cpuinfo']
     serving_requires += SERVING_DEP
+    serving_requires += COMMON_DEP
 
     npu_requires = copy.deepcopy(all_requires)
     cpu_transformers_version = ['transformers == 4.37.0', 'tokenizers == 0.15.2']
@@ -343,7 +366,8 @@ def setup_package():
                         "xpu": xpu_requires,  # default to ipex 2.1 for linux and windows
                         "npu": npu_requires,
                         "xpu-2-1": xpu_21_requires,
-                        "xpu-lnl": xpu_lnl_requires,
+                        "xpu-2-6": xpu_26_requires,
+                        "xpu-2-6-arl": xpu_26_arl_requires,
                         "serving": serving_requires,
                         "cpp": cpp_requires,
                         "llama-index": llama_index_requires}, # for internal usage when upstreaming for llama-index

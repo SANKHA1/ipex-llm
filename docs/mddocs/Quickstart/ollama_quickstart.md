@@ -1,6 +1,20 @@
 # Run Ollama with IPEX-LLM on Intel GPU
+<p>
+  <b>< English</b> | <a href='./ollama_quickstart.zh-CN.md'>中文</a> >
+</p>
 
 [ollama/ollama](https://github.com/ollama/ollama) is popular framework designed to build and run language models on a local machine; you can now use the C++ interface of [`ipex-llm`](https://github.com/intel-analytics/ipex-llm) as an accelerated backend for `ollama` running on Intel **GPU** *(e.g., local PC with iGPU, discrete GPU such as Arc, Flex and Max)*.
+
+> [!Important]
+> You may use [Ollama Portable Zip](./ollama_portable_zip_quickstart.md) to directly run Ollama on Intel GPU with ipex-llm (***without the need of manual installations***).
+
+> [!NOTE]
+> For installation on Intel Arc B-Series GPU (such as **B580**), please refer to this [guide](./bmg_quickstart.md).
+
+> [!NOTE]
+> Our current version is consistent with [v0.9.3](https://github.com/ollama/ollama/releases/tag/v0.9.3) of ollama.
+>
+> `ipex-llm[cpp]==2.2.0b20250629` is consistent with [v0.6.2](https://github.com/ollama/ollama/releases/tag/v0.6.2) of ollama.
 
 See the demo of running LLaMA2-7B on Intel Arc GPU below.
 
@@ -14,14 +28,9 @@ See the demo of running LLaMA2-7B on Intel Arc GPU below.
 </table>
 
 > [!NOTE]
-> `ipex-llm[cpp]==2.2.0b20240826` is consistent with [v0.1.39](https://github.com/ollama/ollama/releases/tag/v0.1.39) of ollama.
->
-> Our current version is consistent with [v0.3.6](https://github.com/ollama/ollama/releases/tag/v0.3.6) of ollama.
-
-> [!NOTE]
-> Starting from `ipex-llm[cpp]==2.2.0b20240912`, oneAPI dependency of `ipex-llm[cpp]` on Windows will switch from `2024.0.0` to `2024.2.1` .
+> Starting from `ipex-llm[cpp]==2.2.0b20250207`, oneAPI dependency of `ipex-llm[cpp]` on Windows will switch from `2024.2.1` to `2025.0.1` .
 > 
-> For this update, it's necessary to create a new conda environment to install the latest version on Windows. If you directly upgrade to `ipex-llm[cpp]>=2.2.0b20240912` in the previous cpp conda environment, you may encounter the error `Can't find sycl7.dll`.
+> For this update, it's necessary to create a new conda environment to install the latest version on Windows. If you directly upgrade to `ipex-llm[cpp]>=2.2.0b20250207` in the previous cpp conda environment, you may encounter the error `Can't find sycl8.dll`.
 
 ## Table of Contents
 - [Install IPEX-LLM for Ollama](./ollama_quickstart.md#1-install-ipex-llm-for-ollama)
@@ -75,8 +84,8 @@ You may launch the Ollama service as below:
   export OLLAMA_NUM_GPU=999
   export no_proxy=localhost,127.0.0.1
   export ZES_ENABLE_SYSMAN=1
+  
   source /opt/intel/oneapi/setvars.sh
-  export SYCL_CACHE_PERSISTENT=1
   # [optional] under most circumstances, the following environment variable may improve performance, but sometimes this may also cause performance degradation
   export SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=1
   # [optional] if you want to run on single GPU, use below command to limit GPU may improve performance
@@ -93,7 +102,6 @@ You may launch the Ollama service as below:
   set OLLAMA_NUM_GPU=999
   set no_proxy=localhost,127.0.0.1
   set ZES_ENABLE_SYSMAN=1
-  set SYCL_CACHE_PERSISTENT=1
   rem under most circumstances, the following environment variable may improve performance, but sometimes this may also cause performance degradation
   set SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=1
 
@@ -126,7 +134,6 @@ Keep the Ollama service on and open another terminal and run `./ollama pull <mod
 <a href="https://llm-assets.readthedocs.io/en/latest/_images/ollama_pull.png" target="_blank">
   <img src="https://llm-assets.readthedocs.io/en/latest/_images/ollama_pull.png" width=100%; />
 </a>
-
 
 ### 5. Using Ollama
 
@@ -174,6 +181,7 @@ Then you can create the model in Ollama by `ollama create example -f Modelfile` 
 - For **Linux users**:
   
   ```bash
+  source /opt/intel/oneapi/setvars.sh
   export no_proxy=localhost,127.0.0.1
   ./ollama create example -f Modelfile
   ./ollama run example
@@ -195,6 +203,7 @@ An example process of interacting with model with `ollama run example` looks lik
   <img src="https://llm-assets.readthedocs.io/en/latest/_images/ollama_gguf_demo_image.png" width=100%; />
 </a>
 
+
 ### Troubleshooting
 #### 1. Unable to run the initialization script
 If you are unable to run `init-ollama.bat`, please make sure you have installed `ipex-llm[cpp]` in your conda environment. If you have installed it, please check if you have activated the correct conda environment. Also, if you are using Windows, please make sure you have run the script with administrator privilege in prompt terminal.
@@ -213,10 +222,30 @@ When launching `ollama serve` for the first time on Windows, it may get stuck du
 
 #### 5. How to distinguish the community version of Ollama from the ipex-llm version of Ollama
 In the server log of community version of Ollama, you may see `source=payload_common.go:139 msg="Dynamic LLM libraries [rocm_v60000 cpu_avx2 cuda_v11 cpu cpu_avx]"`.
-But in the server log of ipex-llm version of Ollama, you should only see `source=payload.go:44 msg="Dynamic LLM libraries [cpu cpu_avx cpu_avx2]"`.
+But in the server log of ipex-llm version of Ollama, you should only see `source=common.go:49 msg="Dynamic LLM libraries" runners=[ipex_llm]`.
 
 #### 6. Ollama hang when multiple different questions is asked or context is long
 If you find ollama hang when multiple different questions is asked or context is long, and you see `update_slots : failed to free spaces in the KV cache` in the server log, this could be because that sometimes the LLM context is larger than the default `n_ctx` value, you may increase the `n_ctx` and try it again.
 
 #### 7. `signal: bus error (core dumped)` error
 If you meet this error, please check your Linux kernel version first. You may encounter this issue on higher kernel versions (like kernel 6.15). You can also refer to [this issue](https://github.com/intel-analytics/ipex-llm/issues/10955) to see if it helps.
+
+#### 8. Save GPU memory by specify `OLLAMA_NUM_PARALLEL=1`
+If you have a limited GPU memory, use `set OLLAMA_NUM_PARALLEL=1` on Windows or `export OLLAMA_NUM_PARALLEL=1` on Linux before `ollama serve` to reduce GPU usage. The default `OLLAMA_NUM_PARALLEL` in ollama upstream is set to 4.
+
+#### 9. `cannot open shared object file` error when executing  `ollama serve`
+When executing `ollama serve` and `ollama run <model_name>`, if you meet `./ollama: error while loading shared libraries: libsvml.so: cannot open shared object file: No such file or directory` on Linux, or if executing `ollama serve` and `ollama run <model_name>` shows no response on Windows, this is most likely caused by the lack of sycl dependency. Please check:
+
+1. if you have installed conda and if you are in the right conda environment which has pip installed oneapi dependencies on Windows
+2. if you have have executed `source /opt/intel/oneapi/setvars.sh` before running both `./ollama serve` and `./ollama run <model_name>` on Linux
+
+#### 10. `ollama serve` has no output or response
+When you start `ollama serve` and execute `ollama run <model_name>`, but `ollama serve` has no response. This may be due to multiple ollama processes running on your device. Please run commands as below:
+
+1. On Linux, you may run `systemctl stop ollama` to stop all ollama processes, and then rerun `ollama serve` in your current directory.
+2. On Windows, you may `set OLLAMA_HOST=0.0.0.0` to ensure that the ollama commands run on the current `ollama serve`.
+
+#### 11. Error `The program was built for 1 devices` when executing `ollama serve`
+When you start `ollama serve` and execute `ollama run <model_name>`, but encounter the error `The program was built for 1 devices. Build program log for 'Intel(R) Arc(TM) A770 Graphics':`. This may be caused by the command `set/export SYCL_CACHE_PERSISTENT=1`. Please run commands as below:
+
+run `unset SYCL_CACHE_PERSISTENT` in the terminal; if the variable has been written into a configuration file such as `~/.bashrc`, you need to manually delete or comment out the conrresponding line.

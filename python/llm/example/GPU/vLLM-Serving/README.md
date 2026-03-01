@@ -1,8 +1,14 @@
-# vLLM continuous batching on Intel GPUs (experimental support)
+> 💡 **Tip**:  
+> For a detailed and up-to-date guide on running `vLLM` serving with `IPEX-LLM` on Intel GPUs **via Docker**, please refer to our official documentation:  
+> [vllm_docker_quickstart.md](https://github.com/intel-analytics/ipex-llm/blob/main/docs/mddocs/DockerGuides/vllm_docker_quickstart.md)  
+>  
+> If you prefer to run **without Docker**, you can refer to this guide: 
+
+# vLLM continuous batching on Intel GPUs
 
 This example demonstrates how to serve a LLaMA2-7B model using vLLM continuous batching on Intel GPU (with IPEX-LLM low-bits optimizations).
 
-The code shown in the following example is ported from [vLLM](https://github.com/vllm-project/vllm/tree/v0.3.3).
+The code shown in the following example is ported from [vLLM](https://github.com/vllm-project/vllm/tree/v0.6.6).
 
 Currently, we support the following models for vLLM engine:
 
@@ -10,6 +16,8 @@ Currently, we support the following models for vLLM engine:
 - Llama series models
 - ChatGLM series models
 - Baichuan series models
+- Deepseek series models
+- Multimodal models
 
 ## Example: Serving LLaMA2-7B using Intel GPU
 
@@ -17,7 +25,9 @@ In this example, we will run Llama2-7b model using Arc A770 and provide `OpenAI-
 
 ### 0. Environment
 
-To use Intel GPUs for deep-learning tasks, you should install the XPU driver and the oneAPI Base Toolkit 2024.0. Please check the requirements at [here](https://github.com/intel-analytics/ipex-llm/tree/main/python/llm/example/GPU#requirements).
+To use Intel GPUs for deep-learning tasks, you should install the XPU driver and the oneAPI Base Toolkit 2025.0.1. Please check the requirements at [here](https://www.intel.com/content/www/us/en/docs/oneapi/installation-guide-linux/2025-0/overview.html).
+
+Besides, you may also want to install the latest compute runtime at [here](https://github.com/intel/compute-runtime/releases)
 
 After install the toolkit, run the following commands in your environment before starting vLLM GPU:
 ```bash
@@ -26,10 +36,9 @@ source /opt/intel/oneapi/setvars.sh
 sycl-ls
 
 # Example output with one Arc A770:
-[opencl:acc:0] Intel(R) FPGA Emulation Platform for OpenCL(TM), Intel(R) FPGA Emulation Device 1.2 [2023.16.7.0.21_160000]
-[opencl:cpu:1] Intel(R) OpenCL, 13th Gen Intel(R) Core(TM) i9-13900K 3.0 [2023.16.7.0.21_160000]
-[opencl:gpu:2] Intel(R) OpenCL Graphics, Intel(R) Arc(TM) A770 Graphics 3.0 [23.17.26241.33]
-[ext_oneapi_level_zero:gpu:0] Intel(R) Level-Zero, Intel(R) Arc(TM) A770 Graphics 1.3 [1.3.26241]
+[level_zero:gpu][level_zero:0] Intel(R) oneAPI Unified Runtime over Level-Zero, Intel(R) Arc(TM) A770 Graphics 12.55.8 [1.6.32224.500000]
+[opencl:cpu][opencl:0] Intel(R) OpenCL, Intel(R) Xeon(R) w5-3435X OpenCL 3.0 (Build 0) [2024.18.12.0.05_160000]
+[opencl:gpu][opencl:1] Intel(R) OpenCL Graphics, Intel(R) Arc(TM) A770 Graphics OpenCL 3.0 NEO  [24.52.32224.5]
 ```
 
 ### 1. Install
@@ -43,24 +52,32 @@ source /opt/intel/oneapi/setvars.sh
 conda create -n ipex-vllm python=3.11
 conda activate ipex-vllm
 # Install dependencies
-pip install --pre --upgrade "ipex-llm[xpu]" --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us/
+pip install --pre --upgrade "ipex-llm[xpu_2.6]" --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us/
+pip install setuptools-scm
+pip install --upgrade cmake
 # cd to your workdir
-git clone -b sycl_xpu https://github.com/analytics-zoo/vllm.git
+git clone -b 0.8.3 https://github.com/analytics-zoo/vllm.git
 cd vllm
-pip install -r requirements-xpu.txt
-pip install --no-deps xformers
-VLLM_BUILD_XPU_OPS=1 pip install --no-build-isolation -v -e .
-pip install outlines==0.0.34 --no-deps
-pip install interegular cloudpickle diskcache joblib lark nest-asyncio numba scipy
+pip install setuptools-scm==8.2.0 setuptools==78.1.0
+pip install --upgrade cmake
+pip install -v -r requirements/xpu.txt
+VLLM_TARGET_DEVICE=xpu python setup.py install
+pip install intel-extension-for-pytorch==2.6.10+xpu --extra-index-url=https://pytorch-extension.intel.com/release-whl/stable/xpu/cn/
+pip uninstall -y oneccl oneccl-devel
 # For Qwen model support
 pip install transformers_stream_generator einops tiktoken
+pip install ray
 ```
 
 ### 2. Configure recommended environment variables
 
 ```bash
 export USE_XETLA=OFF
-export SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=1
+export SYCL_PI_LEVEL_ZERO_USE_IMMEDIATE_COMMANDLISTS=2
+export SYCL_CACHE_PERSISTENT=1
+
+# If you are using woq_int4, be sure to setup the following environment variable based on the cards you want to use:
+export ONEAPI_DEVICE_SELECTOR=level_zero:0,1,2,3   # In case of four cards
 ```
 ### 3. Offline inference/Service
 
@@ -86,6 +103,9 @@ For vLLM, you can start the service using the following command:
 #!/bin/bash
 model="YOUR_MODEL_PATH"
 served_model_name="YOUR_MODEL_NAME"
+export VLLM_RPC_TIMEOUT=100000
+export VLLM_USE_V1=0
+export IPEX_LLM_LOWBIT=fp8
 
  # You may need to adjust the value of
  # --max-model-len, --max-num-batched-tokens, --max-num-seqs
@@ -100,11 +120,12 @@ python -m ipex_llm.vllm.xpu.entrypoints.openai.api_server \
   --device xpu \
   --dtype float16 \
   --enforce-eager \
-  --load-in-low-bit sym_int4 \
+  --load-in-low-bit $IPEX_LLM_LOWBIT \
   --max-model-len 4096 \
   --max-num-batched-tokens 10240 \
   --max-num-seqs 12 \
-  --tensor-parallel-size 1
+  --tensor-parallel-size 1 \
+  --disable-async-output-proc
 ```
 
 You can tune the service using these four arguments:
@@ -200,5 +221,179 @@ python -m ipex_llm.vllm.xpu.entrypoints.openai.api_server \
   --max-model-len 4096 \
   --max-num-batched-tokens 10240 \
   --max-num-seqs 12 \
-  --tensor-parallel-size 2
+  --tensor-parallel-size 2 \
+  --distributed-executor-backend ray \
+  --disable-async-output-proc
 ```
+
+### 4. Load low bit models with vLLM
+
+To load low-bit model directly with vLLM, we can use the following option `--low-bit-model-path` when starting service or `low_bit_model_path` when using `vllm_offline_inference.py`.
+
+The low bit model needs to be saved using the `--low-bit-save-path` or `low_bit_save_path` option.
+
+For instance, to save a FP8 low-bit `DeepSeek-R1-Distill-Qwen-7B` model on disk, we can execute the following python script.
+
+```python
+from vllm import SamplingParams
+from ipex_llm.vllm.xpu.engine import IPEXLLMClass as LLM
+
+# Create an LLM.
+llm = LLM(model="DeepSeek-R1-Distill-Qwen-7B", # Unquantized model path on disk
+          device="xpu",
+          dtype="float16",
+          enforce_eager=True,
+          load_in_low_bit="sym_int4",  # The low-bit you may want to quantized to
+          tensor_parallel_size=1,      # The tp-size you choose needs to be same when you later uses the low-bit model
+          disable_async_output_proc=True,
+          distributed_executor_backend="ray",
+          max_model_len=500,
+          trust_remote_code=True,
+          block_size=8,
+          max_num_batched_tokens=500,
+          low_bit_save_path="/llm/fp8-model-path")  # saved path
+```
+
+When finish executing, the low-bit model has been saved at `/llm/fp8-model-path`.
+
+Later we can use the option `--low-bit-model-path /llm/fp8-model-path` to use the low-bit model.
+
+### 5. Other features
+#### FP8 kv cache
+> Note: Currently, we only support FP8 KV Cache with GQA models.
+
+By using FP8 kv cache, we can reduce the memory footprint. This increases the number of tokens that can be stored in the cache.
+
+To deploy the service with `FP8 kvcache format`, simply adding `--kv-cache-dtype fp8` when starting the service.
+For instance:
+
+```bash
+#!/bin/bash
+model="YOUR_MODEL_PATH"
+served_model_name="YOUR_MODEL_NAME"
+
+# CCL needed environment variables
+export CCL_WORKER_COUNT=2
+export FI_PROVIDER=shm
+export CCL_ATL_TRANSPORT=ofi
+export CCL_ZE_IPC_EXCHANGE=sockets
+export CCL_ATL_SHM=1
+ # You may need to adjust the value of
+ # --max-model-len, --max-num-batched-tokens, --max-num-seqs
+ # to acquire the best performance
+
+python -m ipex_llm.vllm.xpu.entrypoints.openai.api_server \
+  --served-model-name $served_model_name \
+  --port 8000 \
+  --model $model \
+  --trust-remote-code \
+  --gpu-memory-utilization 0.75 \
+  --device xpu \
+  --dtype float16 \
+  --enforce-eager \
+  --load-in-low-bit sym_int4 \
+  --max-model-len 2000 \
+  --max-num-batched-tokens 3000 \
+  --max-num-seqs 256 \
+  --tensor-parallel-size 1 \
+  --distributed-executor-backend ray \
+  --kv-cache-dtype fp8 \
+  --disable-async-output-proc
+```
+
+If the service is booted successfully, you can find the following log:
+![FP8 KV Cache](./fp8_kv.png)
+
+
+#### Varlen Prefill
+The `Varlen Prefill` feature will reduce the memory usage for first token generation, which will leads to longer context support and more kv cache space.
+
+To enable this feature, you can set the environment variable `IPEX_LLM_PREFILL_VARLEN_BACKEND` to 1.
+
+#### Find maximum supported context
+
+To find the maximum supported context, you can set the environment variable `IPEX_LLM_FIND_MAX_LENGTH` to a starting value such as 8000. This value serves as the initial position for searching the maximum context length, and the search proceeds in steps of 250. Note that 8000 is just an example — you can adjust this starting value based on your expected context size.
+
+```bash
+#!/bin/bash
+model="YOUR_MODEL_PATH"
+served_model_name="YOUR_MODEL_NAME"
+export IPEX_LLM_FIND_MAX_LENGTH=8000
+
+# CCL needed environment variables
+export CCL_WORKER_COUNT=2
+export FI_PROVIDER=shm
+export CCL_ATL_TRANSPORT=ofi
+export CCL_ZE_IPC_EXCHANGE=sockets
+export CCL_ATL_SHM=1
+ # You may need to adjust the value of
+ # --max-model-len, --max-num-batched-tokens, --max-num-seqs
+ # to acquire the best performance
+
+python -m ipex_llm.vllm.xpu.entrypoints.openai.api_server \
+  --served-model-name $served_model_name \
+  --port 8000 \
+  --model $model \
+  --trust-remote-code \
+  --gpu-memory-utilization 0.95 \
+  --device xpu \
+  --dtype float16 \
+  --enforce-eager \
+  --load-in-low-bit sym_int4 \
+  --max-model-len 2000 \
+  --max-num-batched-tokens 3000 \
+  --max-num-seqs 256 \
+  --tensor-parallel-size 1 \
+  --distributed-executor-backend ray \
+  --disable-async-output-proc
+```
+
+After seaching has completed, it will show the recommended maximum context length in the log like:
+
+
+![max_length](./max_length.png)
+
+Then, you can start the service with this maximum length:
+
+```bash
+export IPEX_LLM_SELF_MAX_NUM_BATCHED_TOKENS=28500 # Depends on the profiling value
+#!/bin/bash
+model="YOUR_MODEL_PATH"
+served_model_name="YOUR_MODEL_NAME"
+
+# CCL needed environment variables
+export CCL_WORKER_COUNT=2
+export FI_PROVIDER=shm
+export CCL_ATL_TRANSPORT=ofi
+export CCL_ZE_IPC_EXCHANGE=sockets
+export CCL_ATL_SHM=1
+source /opt/intel/1ccl-wks/setvars.sh
+
+ # You may need to adjust the value of
+ # --max-model-len, --max-num-batched-tokens, --max-num-seqs
+ # to acquire the best performance
+
+python -m ipex_llm.vllm.xpu.entrypoints.openai.api_server \
+  --served-model-name $served_model_name \
+  --port 8000 \
+  --model $model \
+  --trust-remote-code \
+  --gpu-memory-utilization 0.95 \
+  --device xpu \
+  --dtype float16 \
+  --enforce-eager \
+  --load-in-low-bit sym_int4 \
+  --max-model-len 28500 \
+  --max-num-batched-tokens 28500 \
+  --max-num-seqs 256 \
+  --tensor-parallel-size 1 \
+  --distributed-executor-backend ray \
+  --disable-async-output-proc
+```
+
+
+### 6. Known issues
+
+#### Runtime memory
+
+If runtime memory is a concern, you can set --swap-space 0.5 to reduce memory consumption during execution. The default value for --swap-space is 4, which means that by default, the system reserves 4GB of memory for use when GPU memory is insufficient.

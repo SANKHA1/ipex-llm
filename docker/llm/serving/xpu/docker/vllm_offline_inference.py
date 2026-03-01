@@ -51,7 +51,11 @@ llm = LLM(model="YOUR_MODEL",
           enforce_eager=True,
           load_in_low_bit="fp8",
           tensor_parallel_size=1,
+          disable_async_output_proc=True,
+          distributed_executor_backend="ray",
           max_model_len=2000,
+          trust_remote_code=True,
+          block_size=8,
           max_num_batched_tokens=2000)
 # Generate texts from the prompts. The output is a list of RequestOutput objects
 # that contain the prompt, generated text, and other information.

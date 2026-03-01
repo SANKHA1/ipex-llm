@@ -43,8 +43,10 @@ from typing import Optional, Tuple, Union, List
 import torch
 
 from ipex_llm.transformers.models.common import merge_qkv_base, attention_softmax
-from ipex_llm.transformers.models.utils import use_quantize_kv_cache, restore_fp8_kv_cache
-from ipex_llm.transformers.models.utils import use_sdp, use_sdp_causal, should_use_fuse_rope
+from ipex_llm.transformers.models.common import scaled_dot_product_attention
+from ipex_llm.transformers.models.utils import use_quantize_kv_cache
+from ipex_llm.transformers.models.utils import should_use_fuse_rope
+from ipex_llm.transformers.models.utils import use_sdp_non_causal
 from ipex_llm.transformers.kv import DynamicFp8Cache, DynamicNormalCache
 from ipex_llm.utils.common import invalidInputError
 
@@ -86,7 +88,9 @@ def qwen2_vl_model_forward(
     # IPEX-LLM OPT start: kv cache and quantize kv cache
     inputs = input_ids if input_ids is not None else inputs_embeds
     use_cache = True if inputs.device.type == "xpu" else use_cache
-    use_quantize_kv = use_quantize_kv_cache(self.layers[0].mlp.down_proj, inputs)
+    num_heads, num_kv_heads = self.config.num_attention_heads, self.config.num_key_value_heads
+    use_quantize_kv = use_quantize_kv_cache(self.layers[0].mlp.down_proj, inputs,
+                                            num_heads, num_kv_heads)
     if use_cache:
         if use_quantize_kv and not isinstance(past_key_values, DynamicFp8Cache):
             past_key_values = DynamicFp8Cache.from_legacy_cache(past_key_values)
@@ -190,22 +194,72 @@ def qwen2_vision_attention_forward(
                                               ).permute(1, 0, 2, 3).unbind(0)
     q = apply_rotary_pos_emb_vision(q.unsqueeze(0), rotary_pos_emb).squeeze(0)
     k = apply_rotary_pos_emb_vision(k.unsqueeze(0), rotary_pos_emb).squeeze(0)
+    # q, k, v: [seq_length, num_heads, head_dim]
 
-    attention_mask = torch.full(
-        [1, seq_length, seq_length], torch.finfo(q.dtype).min, device=q.device, dtype=q.dtype
-    )
-    for i in range(1, len(cu_seqlens)):
-        attention_mask[..., cu_seqlens[i - 1]:cu_seqlens[i],
-                       cu_seqlens[i - 1]:cu_seqlens[i]] = 0
+    seq_lens = cu_seqlens.tolist()
+    invalidInputError(seq_lens[0] == 0 and seq_lens[-1] == seq_length,
+                      "unexpected input")
 
-    q = q.transpose(0, 1)
-    k = k.transpose(0, 1)
-    v = v.transpose(0, 1)
-    attn_weights = torch.matmul(q, k.transpose(1, 2)) / math.sqrt(self.head_dim)
-    attn_weights = attn_weights + attention_mask
-    attn_weights = attention_softmax(attn_weights, False)
-    attn_output = torch.matmul(attn_weights, v)
-    attn_output = attn_output.transpose(0, 1)
+    head_dim = q.size(-1)
+    if use_sdp_non_causal(head_dim, q.device, q.dtype):
+        image_num = len(seq_lens) - 1
+        image_size = seq_lens[1] - seq_lens[0]
+        guessed_seq_lens = torch.arange(0, (image_num + 1) * image_size, image_size,
+                                        dtype=cu_seqlens.dtype, device=cu_seqlens.device)
+        if (guessed_seq_lens == cu_seqlens).all():
+            q = q.view(image_num, image_size, self.num_heads, head_dim).permute(0, 2, 1, 3)
+            k = k.view(image_num, image_size, self.num_heads, head_dim).permute(0, 2, 1, 3)
+            v = v.view(image_num, image_size, self.num_heads, head_dim).permute(0, 2, 1, 3)
+            # q, k, v: [image_num, num_heads, image_size, head_dim]
+
+            attn_output = scaled_dot_product_attention(
+                q, k.contiguous(), v.contiguous(),
+                None, False
+            )
+            attn_output = attn_output.permute(0, 2, 1, 3).contiguous()
+            attn_output = attn_output.view(seq_length, self.num_heads, head_dim)
+            # attn_output: [seq_length, num_heads, head_dim]
+        else:
+            q = q.transpose(0, 1).unsqueeze(0)
+            k = k.transpose(0, 1).unsqueeze(0).contiguous()
+            v = v.transpose(0, 1).unsqueeze(0).contiguous()
+            # q, k, v: [1, num_heads, seq_length, head_dim]
+
+            attn_outputs = []
+            for i in range(image_num):
+                start_idx = seq_lens[i]
+                end_idx = seq_lens[i + 1]
+                tmp_q = q[:, :, start_idx:end_idx, :]
+                tmp_k = k[:, :, start_idx:end_idx, :]
+                tmp_v = v[:, :, start_idx:end_idx, :]
+                attn_output = scaled_dot_product_attention(
+                    tmp_q, tmp_k, tmp_v,
+                    None, False
+                )
+                attn_output = attn_output.permute(0, 2, 1, 3)
+                # attn_output: [1, seq_length, num_heads, head_dim]
+                attn_outputs.append(attn_output)
+            attn_output = torch.cat(attn_outputs, dim=1).squeeze(0)
+            # attn_output: [seq_length, num_heads, head_dim]
+    else:
+        attention_mask = torch.full(
+            [1, seq_length, seq_length], torch.finfo(q.dtype).min, device=q.device, dtype=q.dtype
+        )
+        for i in range(1, len(seq_lens)):
+            attention_mask[..., seq_lens[i - 1]:seq_lens[i], seq_lens[i - 1]:seq_lens[i]] = 0
+
+        q = q.transpose(0, 1)
+        k = k.transpose(0, 1)
+        v = v.transpose(0, 1)
+        # q, k, v: [num_heads, seq_length, head_dim]
+
+        attn_weights = torch.matmul(q, k.transpose(1, 2)) / math.sqrt(head_dim)
+        attn_weights = attn_weights + attention_mask
+        attn_weights = attention_softmax(attn_weights)
+        attn_output = torch.matmul(attn_weights, v)
+        attn_output = attn_output.transpose(0, 1)
+        # attn_output: [seq_length, num_heads, head_dim]
+
     attn_output = attn_output.reshape(seq_length, -1)
     attn_output = self.proj(attn_output)
     return attn_output
@@ -248,42 +302,11 @@ def qwen2_vl_attention_forward(
         key_states, value_states = past_key_value.update(key_states, value_states,
                                                          self.layer_idx, None)
 
-    kv_seq_len = key_states.size(2)
-    if attention_mask is not None:  # no matter the length, we just slice it
-        causal_mask = attention_mask[:, :, :, :kv_seq_len]
-
     attn_weights = None
-    if use_sdp(q_len, kv_seq_len, self.head_dim, query_states):
-        import xe_addons
-        if isinstance(past_key_value, DynamicFp8Cache):
-            attn_output = xe_addons.sdp_fp8(query_states, key_states, value_states, causal_mask)
-        else:
-            attn_output = xe_addons.sdp(query_states, key_states, value_states, causal_mask)
-    elif use_sdp_causal(q_len, kv_seq_len, self.head_dim, query_states, self.training):
-        import xe_addons
-        if isinstance(past_key_value, DynamicFp8Cache):
-            attn_output = xe_addons.sdp_fp8_causal(query_states, key_states,
-                                                   value_states, causal_mask)
-        else:
-            attn_output = xe_addons.sdp_causal(query_states, key_states,
-                                               value_states, causal_mask)
-    else:
-        if isinstance(past_key_value, DynamicFp8Cache):
-            key_states, value_states = restore_fp8_kv_cache(key_states, value_states,
-                                                            query_states.dtype)
-        # repeat k/v heads if n_kv_heads < n_heads
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-        attn_weights = torch.matmul(query_states,
-                                    key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-
-        if causal_mask is not None:
-            attn_weights = attn_weights + causal_mask
-
-        # upcast attention to fp32
-        attn_weights = attention_softmax(attn_weights, self.training)
-        attn_output = torch.matmul(attn_weights, value_states)
+    attn_output = scaled_dot_product_attention(
+        query_states, key_states, value_states,
+        attention_mask, q_len == key_states.size(2)
+    )
 
     attn_output = attn_output.transpose(1, 2).contiguous()
     attn_output = attn_output.reshape(bsz, q_len, -1)

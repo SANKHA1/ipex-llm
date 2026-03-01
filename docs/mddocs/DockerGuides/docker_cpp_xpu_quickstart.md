@@ -16,10 +16,16 @@
 
 Need to enable `--net=host`,follow [this guide](https://docs.docker.com/network/drivers/host/#docker-desktop) so that you can easily access the service running on the docker. The [v6.1x kernel version wsl]( https://learn.microsoft.com/en-us/community/content/wsl-user-msft-kernel-v6#1---building-the-microsoft-linux-kernel-v61x) is recommended to use.Otherwise, you may encounter the blocking issue before loading the model to GPU.
 
-### Pull the latest image
+### Build the Image
+To build the `ipex-llm-inference-cpp-xpu` Docker image, use the following command:
+
 ```bash
-# This image will be updated every day
-docker pull intelanalytics/ipex-llm-inference-cpp-xpu:latest
+cd docker/llm/inference-cpp
+docker build \
+  --build-arg http_proxy=.. \
+  --build-arg https_proxy=.. \
+  --build-arg no_proxy=.. \
+  --rm --no-cache -t intelanalytics/ipex-llm-inference-cpp-xpu:latest .
 ```
 
 ### Start Docker Container
@@ -131,7 +137,7 @@ Please refer to this [documentation](../Quickstart/llama_cpp_quickstart.md) for 
 Running the ollama on the background, you can see the ollama.log in `/root/ollama/ollama.log`
 ```bash
 cd /llm/scripts/
-# set the recommended Env
+# (optional) set the recommended Env , it might cause err. When meet err, you can directly start ollama without set the env. 
 source ipex-llm-init --gpu --device $DEVICE
 bash start-ollama.sh # ctrl+c to exit, and the ollama serve will run on the background
 ```
@@ -196,14 +202,26 @@ Please refer to this [documentation](../Quickstart/ollama_quickstart.md#4-pull-m
 
 ### Running Open WebUI with Intel GPU
 
-Start the ollama and load the model first, then use the open-webui to chat.
-If you have difficulty accessing the huggingface repositories, you may use a mirror, e.g. add `export HF_ENDPOINT=https://hf-mirror.com`before running bash start.sh.
+1. Start the ollama and load the model first, then use the open-webui to chat. If you have difficulty accessing the huggingface repositories, you may use a mirror, e.g. add export HF_ENDPOINT=<https://hf-mirror.com> and run following script to start open-webui docker.
+
 ```bash
-cd /llm/scripts/
-bash start-open-webui.sh
+export DOCKER_IMAGE=ghcr.io/open-webui/open-webui:main
+export CONTAINER_NAME=<YOUR-DOCKER-CONTAINER-NAME>
+
+docker rm -f $CONTAINER_NAME
+
+docker run -itd \
+            -v open-webui:/app/backend/data \
+            -e PORT=8080 \
+            --network=host \
+            --name $CONTAINER_NAME \
+            --restart always $DOCKER_IMAGE
 ```
 
+2. Visit <http://localhost:8080> to use open-webui, the default ollama serve address in open-webui is `http://localhost:11434`, you can change it in connections on `http://localhost:8080/admin/settings`.
+
 Sample output:
+
 ```bash
 INFO:     Started server process [1055]
 INFO:     Waiting for application startup.

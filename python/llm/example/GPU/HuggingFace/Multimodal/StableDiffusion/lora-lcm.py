@@ -17,15 +17,18 @@
 
 import torch
 from diffusers import DiffusionPipeline, LCMScheduler
-import ipex_llm
+from ipex_llm import optimize_model
 import argparse
+import time
 
 
 def main(args):
     pipe = DiffusionPipeline.from_pretrained(
         args.repo_id_or_model_path,
-        torch_dtype=torch.bfloat16,
-    ).to("xpu")
+        torch_dtype=torch.float16,
+    )
+    pipe = optimize_model(pipe, low_bit=None)
+    pipe.to("xpu")
 
     # set scheduler
     pipe.scheduler = LCMScheduler.from_config(pipe.scheduler.config)
@@ -34,10 +37,21 @@ def main(args):
     pipe.load_lora_weights(args.lora_weights_path)
 
     generator = torch.manual_seed(42)
-    image = pipe(
-        prompt=args.prompt, num_inference_steps=args.num_steps, generator=generator, guidance_scale=1.0
-    ).images[0]
-    image.save(args.save_path)
+
+    with torch.inference_mode():
+        # warmup
+        image = pipe(
+            prompt=args.prompt, num_inference_steps=args.num_steps, generator=generator, guidance_scale=1.0
+        ).images[0]
+
+        # start inference
+        st = time.time()
+        image = pipe(
+            prompt=args.prompt, num_inference_steps=args.num_steps, generator=generator, guidance_scale=1.0
+        ).images[0]   
+        end = time.time()
+        print(f'Inference time: {end-st} s')
+        image.save(args.save_path)
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description="Stable Diffusion lora-lcm")

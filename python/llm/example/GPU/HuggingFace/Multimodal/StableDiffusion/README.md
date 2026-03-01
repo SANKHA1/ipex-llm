@@ -9,7 +9,7 @@ Follow the instructions in IPEX-GPU installation guides ([Linux Guide](https://i
 Assume you have created a conda environment named diffusion with ipex-llm installed. Run below commands to install dependencies for running Stable Diffusion.
 ```bash
 conda activate diffusion
-pip install diffusers["torch"] transformers
+pip install diffusers["torch"]==0.31.0 transformers
 pip install -U PEFT transformers
 ```
 
@@ -57,7 +57,6 @@ export ENABLE_SDP_FUSION=1
 
 ```bash
 export SYCL_CACHE_PERSISTENT=1
-export BIGDL_LLM_XMX_DISABLED=1
 ```
 
 </details>
@@ -65,31 +64,32 @@ export BIGDL_LLM_XMX_DISABLED=1
 #### 3.2 Configurations for Windows
 <details>
 
-<summary>For Intel iGPU</summary>
-
-```cmd
-set SYCL_CACHE_PERSISTENT=1
-set BIGDL_LLM_XMX_DISABLED=1
-```
-
-</details>
-
-<details>
-
-<summary>For Intel Arc™ A-Series Graphics</summary>
+<summary>For Intel iGPU and Intel Arc™ A-Series Graphics</summary>
 
 ```cmd
 set SYCL_CACHE_PERSISTENT=1
 ```
 
 </details>
+
 
 > [!NOTE]
 > For the first time that each model runs on Intel iGPU/Intel Arc™ A300-Series or Pro A60, it may take several minutes to compile.
 
 ### 4. Examples
+#### 4.1 Openjourney Example
+The example shows how to run Openjourney example on Intel GPU.
+```bash
+python ./openjourney.py
+```
 
-#### 4.1 StableDiffusion XL Example
+Arguments info:
+- `--repo-id-or-model-path REPO_ID_OR_MODEL_PATH`: argument defining the huggingface repo id for the Openjourney model (e.g. `prompthero/openjourney`) to be downloaded, or the path to the huggingface checkpoint folder. It is default to be `'prompthero/openjourney'`.
+- `--prompt PROMPT`: argument defining the prompt to be infered. It is default to be `'An astronaut in the forest, detailed, 8k'`.
+- `--save-path`: argument defining the path to save the generated figure. It is default to be `openjourney-gpu.png`.
+- `--num-steps`: argument defining the number of inference steps. It is default to be `20`. 
+
+#### 4.2 StableDiffusion XL Example
 The example shows how to run StableDiffusion XL example on Intel GPU.
 ```bash
 python ./sdxl.py
@@ -105,7 +105,7 @@ Arguments info:
 The sample output image looks like below. 
 ![image](https://llm-assets.readthedocs.io/en/latest/_images/sdxl-gpu.png)
 
-#### 4.2 LCM-LoRA Example
+#### 4.3 LCM-LoRA Example
 The example shows how to performing inference with LCM-LoRA on Intel GPU.
 ```bash
 python ./lora-lcm.py

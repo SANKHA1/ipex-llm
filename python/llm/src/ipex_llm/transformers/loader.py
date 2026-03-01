@@ -22,7 +22,7 @@ import time
 from datetime import date
 import argparse
 from ipex_llm.utils.common import invalidInputError
-from transformers import AutoTokenizer, GPTJForCausalLM, LlamaTokenizer
+from transformers import AutoTokenizer, LlamaTokenizer
 
 LLAMA_IDS = ['llama', 'vicuna', 'merged-baize']
 
@@ -90,7 +90,6 @@ def load_model(
         model = model.eval()
 
     if device == "xpu":
-        import intel_extension_for_pytorch as ipex
         print("Convert model to half precision...")
         model = model.half()
         model = model.to('xpu')

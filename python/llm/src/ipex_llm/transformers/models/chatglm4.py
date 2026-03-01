@@ -20,15 +20,14 @@
 import os
 import torch
 from typing import Optional, Tuple, Union
-from ipex_llm.transformers.models.utils import restore_fp8_kv_cache, update_past_key_value
-from ipex_llm.transformers.models.utils import use_quantize_kv_cache, use_sdp, \
-    use_sdp_causal, should_use_compresskv, is_enough_kv_cache_room_4_36, \
-    get_compresskv_attn_mask
+from ipex_llm.transformers.models.common import scaled_dot_product_attention
+from ipex_llm.transformers.models.utils import update_past_key_value
+from ipex_llm.transformers.models.utils import use_quantize_kv_cache
+from ipex_llm.transformers.models.utils import should_use_compresskv, is_enough_kv_cache_room_4_36
 from ipex_llm.transformers.models.utils import should_use_fuse_rope, apply_rotary_pos_emb
-from ipex_llm.transformers.models.chatglm2 import repeat_kv
 from ipex_llm.transformers.kv import DynamicCompressCache, DynamicCompressFp8Cache
 from transformers.modeling_outputs import BaseModelOutputWithPast
-import math
+
 
 KV_CACHE_ALLOC_BLOCK_LENGTH = int(os.environ.get("KV_CACHE_ALLOC_BLOCK_LENGTH", 256))
 
@@ -44,6 +43,7 @@ def chatglm4_model_forward(
     use_cache: Optional[bool] = None,
     output_hidden_states: Optional[bool] = None,
     return_dict: Optional[bool] = None,
+    **kwargs,
 ) -> Union[Tuple, BaseModelOutputWithPast]:
     output_hidden_states = (
         output_hidden_states if output_hidden_states is not None else
@@ -55,8 +55,13 @@ def chatglm4_model_forward(
     if use_cache:
         inputs = input_ids if input_ids is not None else inputs_embeds
         use_compress_kv = should_use_compresskv(inputs, inputs.shape[1])
-        use_quantize_kv = use_quantize_kv_cache(self.encoder.layers[0].mlp.dense_h_to_4h,
-                                                inputs)
+        n_heads = self.config.num_attention_heads
+        if self.config.multi_query_attention:
+            n_kv_heads = self.config.multi_query_group_num
+        else:
+            n_kv_heads = n_heads
+        use_quantize_kv = use_quantize_kv_cache(self.encoder.layers[0].mlp.gate_proj, inputs,
+                                                n_heads, n_kv_heads)
         if use_compress_kv and not isinstance(past_key_values,
                                               DynamicCompressCache):
             if use_quantize_kv:
@@ -75,9 +80,15 @@ def chatglm4_model_forward(
     if full_attention_mask is None:
         if (attention_mask is not None and not attention_mask.all()) or\
                 (past_key_values and seq_length != 1):
-            full_attention_mask = self.get_masks(input_ids,
-                                                 past_key_values,
-                                                 padding_mask=attention_mask)
+            if self.config.hidden_size == 4096:
+                # glm4-9b
+                full_attention_mask = self.get_masks(input_ids,
+                                                     past_key_values,
+                                                     padding_mask=attention_mask)
+            else:
+                full_attention_mask = self.get_masks(inputs_embeds,
+                                                     past_key_values,
+                                                     padding_mask=attention_mask)
 
     # ipex-llm changes begin
     # 1. replace `rotary_pos_emb` with `inv_freq` and `position_ids`
@@ -205,8 +216,6 @@ def chatglm4_attention_forward(
         key_states[..., :rot_dim] = k_rot[...]
 
     # IPEX-LLM OPT: kv cache and quantize kv
-    use_quantize_kv = use_quantize_kv_cache(self.query_key_value, query_states)
-
     # [CompressKV]
     if use_compresskv:
         from transformers.configuration_utils import PretrainedConfig
@@ -220,6 +229,8 @@ def chatglm4_attention_forward(
             self.config, enough_kv_room, KV_CACHE_ALLOC_BLOCK_LENGTH
         )
     else:
+        use_quantize_kv = use_quantize_kv_cache(self.query_key_value, query_states,
+                                                n_head, n_kv_head)
         key_states, value_states = update_past_key_value(
             past_key_value, key_states, value_states,
             kv_seq_len, use_quantize_kv, hidden_states.device
@@ -234,49 +245,10 @@ def chatglm4_attention_forward(
             past_key_value = None
 
     # IPEX-LLM OPT: sdp
-    attn_weights = None
-    if use_sdp(q_len, kv_seq_len, head_dim, query_states):
-        import xe_addons
-        if use_compresskv:
-            attention_mask = get_compresskv_attn_mask(key_states, attention_mask)
-        if use_quantize_kv:
-            attn_output = xe_addons.sdp_fp8(query_states, key_states, value_states, attention_mask)
-        else:
-            attn_output = xe_addons.sdp(query_states, key_states, value_states, attention_mask)
-    elif use_sdp_causal(q_len, kv_seq_len, head_dim, query_states, self.training):
-        import xe_addons
-        if use_quantize_kv:
-            attn_output = xe_addons.sdp_fp8_causal(query_states, key_states, value_states,
-                                                   attention_mask)
-        else:
-            attn_output = xe_addons.sdp_causal(query_states, key_states, value_states,
-                                               attention_mask)
-    elif query_states.device.type == "cpu":
-        # repeat k/v heads if n_kv_heads < n_heads
-        key_states = repeat_kv(key_states, n_head // n_kv_head)
-        value_states = repeat_kv(value_states, n_head // n_kv_head)
-        if q_len == kv_seq_len:
-            attn_output = torch.nn.functional.scaled_dot_product_attention(
-                query_states, key_states, value_states, is_causal=True
-            )
-        else:
-            attn_output = torch.nn.functional.scaled_dot_product_attention(
-                query_states, key_states, value_states, attention_mask
-            )
-    else:
-        if use_quantize_kv:
-            key_states, value_states = restore_fp8_kv_cache(key_states, value_states,
-                                                            query_states.dtype)
-        # repeat k/v heads if n_kv_heads < n_heads
-        key_states = repeat_kv(key_states, n_head // n_kv_head)
-        value_states = repeat_kv(value_states, n_head // n_kv_head)
-        attn_weights = torch.matmul(query_states / math.sqrt(head_dim),
-                                    key_states.transpose(2, 3))
-        if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask
-        attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1,
-                                                   dtype=torch.float32).to(value_states.dtype)
-        attn_output = torch.matmul(attn_weights, value_states)
+    attn_output = scaled_dot_product_attention(
+        query_states, key_states, value_states,
+        attention_mask, q_len == kv_seq_len
+    )
 
     # context_layer's shape: [bsz, n_head, seq_len, head_dim] -> [seq_len, bsz, n_head * head_dim]
     attn_output = attn_output.transpose(1, 2).contiguous().view(bsz, q_len, n_head * head_dim)
@@ -356,3 +328,69 @@ def chatglm4_encoder_forward(
         hidden_states = self.final_layernorm(hidden_states)
 
     return hidden_states, presents, all_hidden_states, all_self_attentions
+
+
+def chatglm4_block_forward(
+    self,
+    hidden_states,
+    attention_mask,
+    rotary_pos_emb,
+    kv_cache=None,
+    use_cache=True,
+):
+    # hidden_states: [s, b, h]
+
+    # Layer norm at the beginning of the transformer layer.
+    layernorm_output = self.input_layernorm(hidden_states)
+    # Self attention.
+    attention_output, kv_cache = self.self_attention(
+        layernorm_output,
+        attention_mask,
+        rotary_pos_emb,
+        kv_cache=kv_cache,
+        use_cache=use_cache
+    )
+
+    # Residual connection.
+    if self.apply_residual_connection_post_layernorm:
+        residual = layernorm_output
+    else:
+        residual = hidden_states
+
+    layernorm_input = torch.nn.functional.dropout(attention_output, p=self.hidden_dropout,
+                                                  training=self.training)
+    layernorm_input = residual + layernorm_input
+
+    # Layer norm post the self attention.
+    layernorm_output = self.post_attention_layernorm(layernorm_input)
+
+    # ipex-llm changes start: workaround fp16 overflow
+    scale = 10
+    if self.layer_number == 39 and layernorm_output.device.type == 'xpu':
+        gate = self.mlp.gate_proj(layernorm_output)
+        up = self.mlp.up_proj(layernorm_output)
+        down = self.mlp.activation_fn(gate) / scale * up
+        mlp_output = self.mlp.dense_4h_to_h(down)
+    else:
+        # MLP.
+        mlp_output = self.mlp(layernorm_output)
+    # ipex-llm changes end
+
+    # Second residual connection.
+    if self.apply_residual_connection_post_layernorm:
+        residual = layernorm_output
+    else:
+        residual = layernorm_input
+
+    output = torch.nn.functional.dropout(mlp_output, p=self.hidden_dropout,
+                                         training=self.training)
+
+    # ipex-llm changes start: workaround fp16 overflow
+    if self.layer_number == 39 and layernorm_output.device.type == 'xpu':
+        output = residual + output * scale
+        output = torch.nan_to_num(output)
+    else:
+        output = residual + output
+    # ipex-llm changes end
+
+    return output, kv_cache

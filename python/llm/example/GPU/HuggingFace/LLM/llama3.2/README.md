@@ -1,5 +1,5 @@
 # Llama3.2
-In this directory, you will find examples on how you could apply IPEX-LLM INT4 optimizations on Llama3.2 models on [Intel GPUs](../../../README.md). For illustration purposes, we utilize the [meta-llama/Meta-Llama-3.2-3B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.2-3B-Instruct) and [meta-llama/Meta-Llama-3.2-1B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.2-1B-Instruct) as reference Llama3.2 models.
+In this directory, you will find examples on how you could apply IPEX-LLM INT4 optimizations on Llama3.2 models on [Intel GPUs](../../../README.md). For illustration purposes, we utilize the [meta-llama/Llama-3.2-3B-Instruct](https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct) and [meta-llama/Llama-3.2-1B-Instruct](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct) as reference Llama3.2 models.
 
 ## 0. Requirements
 To run these examples with IPEX-LLM on Intel GPUs, we have some recommended requirements for your machine, please refer to [here](../../../README.md#requirements) for more information.
@@ -17,7 +17,7 @@ pip install --pre --upgrade ipex-llm[xpu] --extra-index-url https://pytorch-exte
 
 pip install transformers==4.45.0
 pip install accelerate==0.33.0
-pip install trl
+pip install "trl<0.12.0"
 ```
 
 #### 1.2 Installation on Windows
@@ -31,7 +31,7 @@ pip install --pre --upgrade ipex-llm[xpu] --extra-index-url https://pytorch-exte
 
 pip install transformers==4.45.0
 pip install accelerate==0.33.0
-pip install trl 
+pip install "trl<0.12.0" 
 ```
 
 ### 2. Configures OneAPI environment variables for Linux
@@ -79,7 +79,6 @@ export ENABLE_SDP_FUSION=1
 
 ```bash
 export SYCL_CACHE_PERSISTENT=1
-export BIGDL_LLM_XMX_DISABLED=1
 ```
 
 </details>
@@ -87,24 +86,14 @@ export BIGDL_LLM_XMX_DISABLED=1
 #### 3.2 Configurations for Windows
 <details>
 
-<summary>For Intel iGPU</summary>
-
-```cmd
-set SYCL_CACHE_PERSISTENT=1
-set BIGDL_LLM_XMX_DISABLED=1
-```
-
-</details>
-
-<details>
-
-<summary>For Intel Arc™ A-Series Graphics</summary>
+<summary>For Intel iGPU and Intel Arc™ A-Series Graphics</summary>
 
 ```cmd
 set SYCL_CACHE_PERSISTENT=1
 ```
 
 </details>
+
 
 > [!NOTE]
 > For the first time that each model runs on Intel iGPU/Intel Arc™ A300-Series or Pro A60, it may take several minutes to compile.
@@ -115,12 +104,12 @@ python ./generate.py --repo-id-or-model-path REPO_ID_OR_MODEL_PATH --prompt PROM
 ```
 
 Arguments info:
-- `--repo-id-or-model-path REPO_ID_OR_MODEL_PATH`: argument defining the huggingface repo id for the Llama3.2 model (e.g. `meta-llama/Meta-Llama-3.2-3B-Instruct`) to be downloaded, or the path to the huggingface checkpoint folder. It is default to be `'meta-llama/Meta-Llama-3.2-3B-Instruct'`.
+- `--repo-id-or-model-path REPO_ID_OR_MODEL_PATH`: argument defining the huggingface repo id for the Llama3.2 model (e.g. `meta-llama/Llama-3.2-3B-Instruct`) to be downloaded, or the path to the huggingface checkpoint folder. It is default to be `'meta-llama/Llama-3.2-3B-Instruct'`.
 - `--prompt PROMPT`: argument defining the prompt to be infered (with integrated prompt format for chat). It is default to be `'What is AI?'`.
 - `--n-predict N_PREDICT`: argument defining the max number of tokens to predict. It is default to be `32`.
 
 #### Sample Output
-#### [meta-llama/Meta-Llama-3.2-3B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.2-3B-Instruct)
+#### [meta-llama/Llama-3.2-3B-Instruct](https://huggingface.co/meta-llama/Llama-3.2-3B-Instruct)
 ```log
 Inference time: xxxx s
 -------------------- Prompt --------------------
@@ -137,7 +126,7 @@ What is AI?<|eot_id|><|start_header_id|>assistant<|end_header_id|>
 Artificial Intelligence (AI) refers to the development of computer systems that can perform tasks that would typically require human intelligence, such as learning, problem-solving, and
 ```
 
-#### [meta-llama/Meta-Llama-3.2-1B-Instruct](https://huggingface.co/meta-llama/Meta-Llama-3.2-1B-Instruct)
+#### [meta-llama/Llama-3.2-1B-Instruct](https://huggingface.co/meta-llama/Llama-3.2-1B-Instruct)
 ```log
 Inference time: xxxx s
 -------------------- Prompt --------------------

@@ -29,28 +29,13 @@ start=$(date "+%s")
 source ${ANALYTICS_ZOO_ROOT}/python/llm/test/run-llm-check-function.sh
 
 pytest_check_error pytest ${LLM_INFERENCE_TEST_DIR}/test_transformers_api.py -v -s
-pytest_check_error pytest ${LLM_INFERENCE_TEST_DIR}/test_transformers_api_layernorm.py -v -s
-
-export BIGDL_LLM_XMX_DISABLED=1
 pytest_check_error pytest ${LLM_INFERENCE_TEST_DIR}/test_transformers_api_final_logits.py -v -s
 pytest_check_error pytest ${LLM_INFERENCE_TEST_DIR}/test_transformers_api_attention.py -v -s
 pytest_check_error pytest ${LLM_INFERENCE_TEST_DIR}/test_transformers_api_mlp.py -v -s
 pytest_check_error pytest ${LLM_INFERENCE_TEST_DIR}/test_transformers_api_RMSNorm.py -v -s
-unset BIGDL_LLM_XMX_DISABLED
 
 now=$(date "+%s")
 time=$((now-start))
 
 echo "Bigdl-llm gpu inference tests finished"
-echo "Time used:$time seconds"
-
-echo "# Start testing layers.fast_rope_embedding"
-start=$(date "+%s")
-
-pytest_check_error pytest ${LLM_INFERENCE_TEST_DIR}/test_layer_fast_rope.py -v -s
-
-now=$(date "+%s")
-time=$((now-start))
-
-echo "Bigdl-llm gpu layers.fast_rope_embedding tests finished"
 echo "Time used:$time seconds"

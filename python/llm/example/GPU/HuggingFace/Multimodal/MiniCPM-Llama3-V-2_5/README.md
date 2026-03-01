@@ -15,7 +15,7 @@ conda activate llm
 # below command will install intel_extension_for_pytorch==2.1.10+xpu as default
 pip install --pre --upgrade ipex-llm[xpu] --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us/
 
-pip install transformers==4.41.0 trl
+pip install transformers==4.41.0 "trl<0.12.0"
 ```
 
 #### 1.2 Installation on Windows
@@ -27,7 +27,7 @@ conda activate llm
 # below command will install intel_extension_for_pytorch==2.1.10+xpu as default
 pip install --pre --upgrade ipex-llm[xpu] --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us/
 
-pip install transformers==4.41.0 trl
+pip install transformers==4.41.0 "trl<0.12.0"
 ```
 
 ### 2. Configures OneAPI environment variables for Linux
@@ -75,7 +75,6 @@ export ENABLE_SDP_FUSION=1
 
 ```bash
 export SYCL_CACHE_PERSISTENT=1
-export BIGDL_LLM_XMX_DISABLED=1
 ```
 
 </details>
@@ -83,24 +82,14 @@ export BIGDL_LLM_XMX_DISABLED=1
 #### 3.2 Configurations for Windows
 <details>
 
-<summary>For Intel iGPU</summary>
-
-```cmd
-set SYCL_CACHE_PERSISTENT=1
-set BIGDL_LLM_XMX_DISABLED=1
-```
-
-</details>
-
-<details>
-
-<summary>For Intel Arc™ A-Series Graphics</summary>
+<summary>For Intel iGPU and Intel Arc™ A-Series Graphics</summary>
 
 ```cmd
 set SYCL_CACHE_PERSISTENT=1
 ```
 
 </details>
+
 
 > [!NOTE]
 > For the first time that each model runs on Intel iGPU/Intel Arc™ A300-Series or Pro A60, it may take several minutes to compile.

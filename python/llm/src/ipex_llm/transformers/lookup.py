@@ -27,11 +27,13 @@ import time
 import copy
 import random
 import logging
+import transformers
 from transformers import GenerationConfig, LogitsProcessorList, StoppingCriteriaList
 from ipex_llm.transformers.speculative import greedy, deepmind_sample, logits_to_probs,\
-    _crop_past_key_values, _prepare_generate_args, _non_cpu_ipex_verify, clear_benchmarks
+    _crop_past_key_values, _prepare_generate_args, _non_cpu_ipex_verify, clear_benchmarks,\
+    _prepare_generate_args_4_45
 from ipex_llm.utils.common import invalidInputError
-from ipex_llm.transformers.utils import get_xpu_device_type
+from ipex_llm.transformers.utils import get_xpu_device_name
 
 logger = logging.getLogger("ipex_llm.lookup")
 
@@ -165,7 +167,7 @@ class PromptLookupCandidateGenerator():
         self.num_output_tokens = num_output_tokens
         self.max_matching_ngram_size = max_matching_ngram_size if max_matching_ngram_size else 2
 
-        if device == "mtl":
+        if device in ["mtl", "lnl"]:
             self.max_candidates = 3
             self.min_candidates = 0
         else:
@@ -278,17 +280,22 @@ def lookup_generate(self,
                     streamer: Optional["BaseStreamer"] = None,
                     attention_mask=None,
                     **sampling_kwargs):
-    input_ids, generation_config, logits_processor, stopping_criteria, \
-        model_kwargs = _prepare_generate_args(self, inputs, generation_config,
-                                              **sampling_kwargs)
+    from packaging import version
+    trans_version = transformers.__version__
+
+    if version.parse(trans_version) >= version.parse("4.45.0"):
+        input_ids, generation_config, logits_processor, stopping_criteria, \
+            model_kwargs = _prepare_generate_args_4_45(self, inputs, generation_config,
+                                                       streamer, **sampling_kwargs)
+    else:
+        input_ids, generation_config, logits_processor, stopping_criteria, \
+            model_kwargs = _prepare_generate_args(self, inputs, generation_config,
+                                                  streamer, **sampling_kwargs)
 
     invalidInputError(input_ids.shape[0] == 1,
                       "Prompt lookup is currently not supported with batch inference.")
 
-    if streamer is not None:
-        streamer.put(input_ids.cpu())
-
-    device_name = get_xpu_device_type(input_ids)
+    device_name = get_xpu_device_name(input_ids.device)
 
     candidates_generator = PromptLookupCandidateGenerator(
         num_output_tokens=num_output_tokens,
@@ -411,7 +418,7 @@ def lookup_generate(self,
             accept_rate = self.n_matched/self.n_drafted if self.n_drafted > 0 else 1
             self.accept_rate.append(accept_rate)
             # Update the candidate generation strategy if needed
-            if device_name != 'mtl':
+            if device_name not in ["mtl", "lnl"]:
                 candidates_generator.update_candidate_strategy(candidate_length, n_matches,
                                                                accept_rate)
 

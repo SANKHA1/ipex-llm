@@ -1,6 +1,18 @@
 # Install IPEX-LLM on Windows with Intel GPU
-
+<p>
+  < <b>English</b> | <a href='./install_windows_gpu.zh-CN.md'>中文</a> >
+</p>
+    
 This guide demonstrates how to install IPEX-LLM on Windows with Intel GPUs. 
+
+> [!NOTE]
+> For installation with PyTorch 2.6, please refer to this [guide](./install_pytorch26_gpu.md) for more information.
+
+> [!NOTE]
+> For installation on Intel Arc B-Series GPU (such as **B580**), please refer to this [guide](./bmg_quickstart.md).
+
+> [!NOTE]
+> For **Linux** installation, please refer to this [guide](./install_linux_gpu.md).
 
 It applies to Intel Core Ultra and Core 11 - 14 gen integrated GPUs (iGPUs), as well as Intel Arc Series GPU.
 
@@ -45,19 +57,27 @@ conda activate llm
   
 ## Install `ipex-llm`
 
-With the `llm` environment active, use `pip` to install `ipex-llm` for GPU. Choose either US or CN website for `extra-index-url`:
+With the `llm` environment active, use `pip` to install `ipex-llm` for GPU:
+
+Choose either US or CN website for `extra-index-url`:
 
 - For **US**:
 
-  ```bash
-  pip install --pre --upgrade ipex-llm[xpu] --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us/
-  ```
+   ```cmd
+   conda create -n llm python=3.11 libuv
+   conda activate llm
+
+   pip install --pre --upgrade ipex-llm[xpu] --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us/
+   ```
 
 - For **CN**:
 
-  ```bash
-  pip install --pre --upgrade ipex-llm[xpu] --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/cn/
-  ```
+   ```cmd
+   conda create -n llm python=3.11 libuv
+   conda activate llm
+
+   pip install --pre --upgrade ipex-llm[xpu] --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/cn/
+   ```
 
 > [!NOTE]
 > If you encounter network issues while installing IPEX, refer to [this guide](../Overview/install_gpu.md#install-ipex-llm-from-wheel) for troubleshooting advice.
@@ -74,19 +94,12 @@ You can verify if `ipex-llm` is successfully installed following below steps.
 
 - Set the following environment variables according to your device:
 
-  - For **Intel iGPU**:
-
-    ```cmd
-    set SYCL_CACHE_PERSISTENT=1
-    set BIGDL_LLM_XMX_DISABLED=1
-    ```
-
-  - For **Intel Arc™ A770**:
+  - For **Intel iGPU** and **Intel Arc™ A770**:
 
     ```cmd
     set SYCL_CACHE_PERSISTENT=1
     ```
-  
+    
 > [!TIP]
 > For other Intel dGPU Series, please refer to [this guide](../Overview/install_gpu.md#runtime-configuration) for more details regarding runtime configuration.
 
@@ -123,7 +136,7 @@ To monitor your GPU's performance and status (e.g. memory consumption, utilizati
 
 ## A Quick Example
 
-Now let's play with a real LLM. We'll be using the [Qwen2-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2-1.5B-Instruct) model, a 1.8 billion parameter LLM for this demonstration. Follow the steps below to setup and run the model, and observe how it responds to a prompt "What is AI?". 
+Now let's play with a real LLM. We'll be using the [Qwen2-1.5B-Instruct](https://huggingface.co/Qwen/Qwen2-1.5B-Instruct) model, a 1.5 billion parameter LLM for this demonstration. Follow the steps below to setup and run the model, and observe how it responds to a prompt "What is AI?". 
 
 - Step 1: Follow [Runtime Configurations Section](#step-1-runtime-configurations) above to prepare your runtime environment.
 

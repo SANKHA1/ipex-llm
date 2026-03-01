@@ -35,12 +35,11 @@ import os
 import math
 import torch
 import warnings
-from torch import nn
 
 from ipex_llm.transformers.models.common import attention_softmax
+from ipex_llm.transformers.models.common import scaled_dot_product_attention
 from ipex_llm.transformers.models.utils import should_use_fuse_rope, rotate_half
-from ipex_llm.transformers.models.utils import mlp_fusion_check, SILU
-from ipex_llm.transformers.models.utils import use_sdp, use_sdp_causal, get_compresskv_attn_mask
+from ipex_llm.transformers.models.utils import use_sdp, use_sdp_causal
 from ipex_llm.transformers.models.utils import use_quantize_kv_cache, restore_fp8_kv_cache
 from ipex_llm.transformers.models.utils import should_use_compresskv, is_enough_kv_cache_room_4_36
 from ipex_llm.transformers.kv import DynamicNormalCache, DynamicFp8Cache, \
@@ -149,28 +148,20 @@ def attention_forward(
             key_states, value_states = past_key_value.update(key_states, value_states,
                                                              self.layer_idx, None)
 
+    attn_weights = None
     if use_sdp(q_len, kv_seq_len, self.head_dim, query_states):
-        # [CompressKV]
-        if use_compresskv:
-            attention_mask = get_compresskv_attn_mask(key_states, attention_mask)
-        import xe_addons
-        if use_quantizekv:
-            attn_output = xe_addons.sdp_fp8(query_states, key_states, value_states,
-                                            attention_mask)
-        else:
-            attn_output = xe_addons.sdp(query_states, key_states, value_states,
-                                        attention_mask)
+        attn_output = scaled_dot_product_attention(
+            query_states, key_states, value_states,
+            attention_mask, False
+        )
     elif (
         use_sdp_causal(q_len, kv_seq_len, self.head_dim, query_states, self.training)
         and os.environ.get("IPEX_LLM_LOW_MEM", "0") == "1"
     ):
-        import xe_addons
-        if isinstance(past_key_value, DynamicFp8Cache):
-            attn_output = xe_addons.sdp_fp8_causal(query_states, key_states,
-                                                   value_states, attention_mask)
-        else:
-            attn_output = xe_addons.sdp_causal(query_states, key_states,
-                                               value_states, attention_mask)
+        attn_output = scaled_dot_product_attention(
+            query_states, key_states, value_states,
+            attention_mask, True
+        )
     else:
         if use_quantizekv:
             key_states, value_states = restore_fp8_kv_cache(key_states, value_states,
@@ -185,7 +176,7 @@ def attention_forward(
         attn_weights.div_(math.sqrt(self.head_dim))
         if attention_mask is not None:
             attn_weights.add_(attention_mask)
-        attn_weights = attention_softmax(attn_weights, self.training)
+        attn_weights = attention_softmax(attn_weights)
 
         attn_weights = torch.nn.functional.dropout(attn_weights, p=self.attention_dropout,
                                                    training=self.training)
@@ -221,24 +212,8 @@ def split_mlp(module: torch.nn.Module):
 
         del module.gate_up_proj
 
-
-def mlp_forward(
-    self,
-    hidden_states: torch.FloatTensor
-) -> torch.FloatTensor:
-    x_2d = hidden_states.view(-1, hidden_states.shape[-1])
-    qtype = getattr(self.gate_proj, "qtype", None)
-    if mlp_fusion_check(x_2d, qtype, self.training):
-        x_2d = x_2d.contiguous()
-        import xe_linear
-        return self.down_proj(xe_linear.mlp_forward_xpu(
-            x_2d, self.gate_proj.weight.data, self.up_proj.weight.data,
-            x_2d.shape[0], x_2d.shape[1], self.gate_proj.out_features,
-            SILU, qtype
-        ))
-    return self.down_proj(
-        self.activation_fn(self.gate_proj(hidden_states)) * self.up_proj(hidden_states)
-    )
+        # rename activation function
+        module.act_fn = module.activation_fn
 
 
 def phi3_model_forward_wrapper(origin_model_forward):
@@ -257,7 +232,9 @@ def phi3_model_forward_wrapper(origin_model_forward):
         # IPEX-LLM OPT: kv cache and quantize kv cache and sdp
         use_cache = use_cache if use_cache is not None else self.config.use_cache
         inputs = input_ids if input_ids is not None else inputs_embeds
-        use_quantize_kv = use_quantize_kv_cache(self.layers[0].mlp.down_proj, inputs)
+        num_heads, num_kv_heads = self.config.num_attention_heads, self.config.num_key_value_heads
+        use_quantize_kv = use_quantize_kv_cache(self.layers[0].mlp.down_proj, inputs,
+                                                num_heads, num_kv_heads)
         use_compress_kv = should_use_compresskv(inputs, inputs.shape[1]) or \
             isinstance(past_key_values, DynamicCompressCache)
         if use_cache:
@@ -313,7 +290,9 @@ def phi3v_model_forward_wrapper(origin_model_forward):
     ):
         # IPEX-LLM OPT: kv cache and quantize kv cache and sdp
         use_cache = use_cache if use_cache is not None else self.config.use_cache
-        use_quantize_kv = use_quantize_kv_cache(self.layers[0].mlp.down_proj, input_ids)
+        num_heads, num_kv_heads = self.config.num_attention_heads, self.config.num_key_value_heads
+        use_quantize_kv = use_quantize_kv_cache(self.layers[0].mlp.down_proj, input_ids,
+                                                num_heads, num_kv_heads)
         if use_cache:
             if use_quantize_kv and not isinstance(past_key_values, DynamicFp8Cache):
                 past_key_values = DynamicFp8Cache.from_legacy_cache(past_key_values)
@@ -334,17 +313,3 @@ def phi3v_model_forward_wrapper(origin_model_forward):
             return_dict=return_dict,
         )
     return model_forward
-
-
-def phi3_rms_norm_forward(self, hidden_states):
-    if hidden_states.device.type == "xpu" and not (self.training and hidden_states.requires_grad):
-        import xe_addons
-        x_2d = hidden_states.reshape(-1, hidden_states.size(-1)).contiguous()
-        output = xe_addons.rms_norm(self.weight, x_2d, self.variance_epsilon)
-        return output.reshape(hidden_states.shape)
-
-    input_dtype = hidden_states.dtype
-    hidden_states = hidden_states.to(torch.float32)
-    variance = hidden_states.pow(2).mean(-1, keepdim=True)
-    hidden_states = hidden_states * torch.rsqrt(variance + self.variance_epsilon)
-    return self.weight * hidden_states.to(input_dtype)

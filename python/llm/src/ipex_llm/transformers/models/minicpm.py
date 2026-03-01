@@ -38,22 +38,32 @@
 
 import torch
 import warnings
-import torch.nn as nn
 from typing import Optional, Tuple, Union, List
 import math
 from ipex_llm.transformers.models.utils import apply_rotary_pos_emb, is_enough_kv_cache_room_4_36
-from ipex_llm.transformers.models.utils import use_sdp, use_sdp_causal, use_quantize_kv_cache
-from ipex_llm.transformers.models.utils import restore_fp8_kv_cache, get_compresskv_attn_mask
+from ipex_llm.transformers.models.utils import use_quantize_kv_cache
 from ipex_llm.transformers.models.utils import should_use_compresskv, should_use_fuse_rope
-from ipex_llm.transformers.models.llama import repeat_kv
 from ipex_llm.transformers.models.common import merge_qkv_base
+from ipex_llm.transformers.models.common import scaled_dot_product_attention
 from ipex_llm.transformers.kv import DynamicNormalCache, DynamicFp8Cache, \
     DynamicCompressCache, DynamicCompressFp8Cache
 from transformers.cache_utils import Cache
 
 
 def merge_qkv(module: torch.nn.Module):
-    return merge_qkv_base(module, "MiniCPMAttention")
+    merge_qkv_base(module, "MiniCPMAttention")
+    merge_qkv_base(module, "MiniCPMSdpaAttention")
+
+
+def apply_residual_scale(module: torch.nn.Module):
+    if module.__class__.__name__ == "MiniCPMDecoderLayer":
+        scale = module.scale_depth / math.sqrt(module.num_hidden_layers)
+        module.self_attn.o_proj.weight.data *= scale
+        if module.self_attn.o_proj.bias is not None:
+            module.self_attn.o_proj.bias.weight.data *= scale
+        module.mlp.down_proj.weight.data *= scale
+        if module.mlp.down_proj.bias is not None:
+            module.mlp.down_proj.bias.weight.data *= scale
 
 
 def minicpm_attention_forward(
@@ -89,8 +99,15 @@ def minicpm_attention_forward(
         kv_seq_len += past_key_value.get_usable_length(kv_seq_len, self.layer_idx)
 
     if should_use_fuse_rope(hidden_states, position_ids, self.training):
+        if self.rotary_emb.__class__.__name__ == "MiniCPMLongRoPE":
+            if kv_seq_len > self.rotary_emb.original_max_position_embeddings:
+                inv_freq = self.rotary_emb.long_inv_freq
+            else:
+                inv_freq = self.rotary_emb.short_inv_freq
+        else:
+            inv_freq = self.rotary_emb.inv_freq
         import xe_addons
-        xe_addons.rotary_half_inplaced(self.rotary_emb.inv_freq, position_ids,
+        xe_addons.rotary_half_inplaced(inv_freq, position_ids,
                                        query_states, key_states)
     else:
         cos, sin = self.rotary_emb(value_states.to(torch.float32), seq_len=kv_seq_len)
@@ -110,48 +127,10 @@ def minicpm_attention_forward(
                                                              self.layer_idx, None)
 
     attn_weights = None
-    if use_sdp(q_len, kv_seq_len, self.head_dim, query_states):
-        import xe_addons
-        # [CompressKV]
-        if use_compresskv:
-            attention_mask = get_compresskv_attn_mask(key_states, attention_mask)
-
-        if use_quantizekv:
-            attn_output = xe_addons.sdp_fp8(query_states, key_states, value_states,
-                                            attention_mask)
-        else:
-            attn_output = xe_addons.sdp(query_states, key_states, value_states,
-                                        attention_mask)
-    elif use_sdp_causal(q_len, kv_seq_len, self.head_dim, query_states, self.training):
-        import xe_addons
-        if use_quantizekv:
-            attn_output = xe_addons.sdp_fp8_causal(query_states, key_states,
-                                                   value_states, attention_mask)
-        else:
-            attn_output = xe_addons.sdp_causal(query_states, key_states,
-                                               value_states, attention_mask)
-    else:
-        if use_quantizekv:
-            key_states, value_states = restore_fp8_kv_cache(key_states, value_states,
-                                                            query_states.dtype)
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-        attn_weights = torch.matmul(
-            query_states, key_states.transpose(2, 3)
-        ) / math.sqrt(self.head_dim)
-
-        if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask
-
-        # upcast attention to fp32
-        attn_weights = nn.functional.softmax(
-            attn_weights, dim=-1, dtype=torch.float32
-        ).to(query_states.dtype)
-        attn_weights = nn.functional.dropout(
-            attn_weights, p=self.attention_dropout, training=self.training
-        )
-        attn_output = torch.matmul(attn_weights, value_states)
+    attn_output = scaled_dot_product_attention(
+        query_states, key_states, value_states,
+        attention_mask, q_len == kv_seq_len
+    )
 
     attn_output = attn_output.transpose(1, 2).contiguous()
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
@@ -180,7 +159,7 @@ def minicpm_model_forward_wrapper(origin_forward):
         # IPEX-LLM OPT: kv cache and quantize kv cache
         inputs = input_ids if input_ids is not None else inputs_embeds
         use_quantize_kv = use_quantize_kv_cache(self.layers[0].mlp.up_proj, inputs,
-                                                self.config.num_attention_heads //
+                                                self.config.num_attention_heads,
                                                 self.config.num_key_value_heads)
         use_compress_kv = should_use_compresskv(inputs, inputs.shape[1]) or \
             isinstance(past_key_values, DynamicCompressCache)
@@ -214,3 +193,52 @@ def minicpm_model_forward_wrapper(origin_forward):
         )
 
     return minicpm_model_forward
+
+
+def minicpm_decoder_layer_forward(
+    self,
+    hidden_states: torch.Tensor,
+    attention_mask: Optional[torch.Tensor] = None,
+    position_ids: Optional[torch.LongTensor] = None,
+    past_key_value: Optional[Tuple[torch.Tensor]] = None,
+    output_attentions: Optional[bool] = False,
+    use_cache: Optional[bool] = False,
+    **kwargs,
+) -> Tuple[torch.FloatTensor, Optional[Tuple[torch.FloatTensor, torch.FloatTensor]]]:
+    residual = hidden_states
+    hidden_states = self.input_layernorm(hidden_states)
+
+    # Self Attention
+    hidden_states, self_attn_weights, present_key_value = self.self_attn(
+        hidden_states=hidden_states,
+        attention_mask=attention_mask,
+        position_ids=position_ids,
+        past_key_value=past_key_value,
+        output_attentions=output_attentions,
+        use_cache=use_cache,
+        **kwargs,
+    )
+
+    # ipex-llm changes start
+    hidden_states = residual + hidden_states
+    # ipex-llm changes end
+
+    # Fully Connected
+    residual = hidden_states
+    hidden_states = self.post_attention_layernorm(hidden_states)
+
+    hidden_states = self.mlp(hidden_states)
+
+    # ipex-llm changes start
+    hidden_states = residual + hidden_states
+    # ipex-llm changes end
+
+    outputs = (hidden_states,)
+
+    if output_attentions:
+        outputs += (self_attn_weights,)
+
+    if use_cache:
+        outputs += (present_key_value,)
+
+    return outputs

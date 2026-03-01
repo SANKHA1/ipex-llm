@@ -1,101 +1,194 @@
-FROM intel/oneapi-basekit:2024.1.1-devel-ubuntu22.04
+# Copyright (C) 2025 Intel Corporation
+# SPDX-License-Identifier: Apache-2.0
+
+# First stage: build oneccl
+FROM intel/oneapi-basekit:2025.0.1-0-devel-ubuntu22.04 AS build
 
 ARG http_proxy
 ARG https_proxy
-
-ENV TZ=Asia/Shanghai
-ENV PYTHONUNBUFFERED=1
-
-
-# Disable pip's cache behavior
 ARG PIP_NO_CACHE_DIR=false
-ADD ./gradio_web_server.patch  /tmp/gradio_web_server.patch
-ADD ./oneccl-binding.patch     /tmp/oneccl-binding.patch
 
-RUN wget -O- https://apt.repos.intel.com/intel-gpg-keys/GPG-PUB-KEY-INTEL-SW-PRODUCTS.PUB | gpg --dearmor | tee /usr/share/keyrings/intel-oneapi-archive-keyring.gpg > /dev/null && \
-    echo "deb [signed-by=/usr/share/keyrings/intel-oneapi-archive-keyring.gpg] https://apt.repos.intel.com/oneapi all main " | tee /etc/apt/sources.list.d/oneAPI.list && \
-    chmod 644 /usr/share/keyrings/intel-oneapi-archive-keyring.gpg && \
-    rm /etc/apt/sources.list.d/intel-graphics.list && \
-    wget -O- https://repositories.intel.com/graphics/intel-graphics.key | gpg --dearmor | tee /usr/share/keyrings/intel-graphics.gpg > /dev/null && \
-    echo "deb [arch=amd64,i386 signed-by=/usr/share/keyrings/intel-graphics.gpg] https://repositories.intel.com/graphics/ubuntu jammy arc" | tee /etc/apt/sources.list.d/intel.gpu.jammy.list && \
-    chmod 644 /usr/share/keyrings/intel-graphics.gpg && \
+# Set environment variables
+ENV TZ=Asia/Shanghai PYTHONUNBUFFERED=1
+
+# Copy patch file and benchmark scripts
+COPY ./ccl_torch.patch /tmp/
+COPY ./vllm_online_benchmark.py ./vllm_offline_inference.py ./vllm_offline_inference_vision_language.py \
+     ./payload-1024.lua ./start-vllm-service.sh ./benchmark_vllm_throughput.py ./benchmark_vllm_latency.py \
+     ./vllm_online_benchmark_multimodal.py ./start-pp_serving-service.sh /llm/
+COPY ./1ccl_for_multi_arc.patch /build/
+     
+RUN set -eux && \
+    #
+    # Update and install basic dependencies
     apt-get update && \
-    apt-get install -y --no-install-recommends curl wget git libunwind8-dev vim less && \
-    ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && echo $TZ > /etc/timezone && \
-    env DEBIAN_FRONTEND=noninteractive apt-get update && \
-    # add-apt-repository requires gnupg, gpg-agent, software-properties-common
-    apt-get install -y --no-install-recommends gnupg gpg-agent software-properties-common && \
-    # Add Python 3.11 PPA repository
+    apt-get install -y --no-install-recommends \
+      curl wget git libunwind8-dev vim less gnupg gpg-agent software-properties-common \
+      libfabric-dev wrk libaio-dev numactl && \
+    # 
+    # Set timezone
+    ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && \
+    echo $TZ > /etc/timezone && \
+    # 
+    # Install Python 3.11
     add-apt-repository ppa:deadsnakes/ppa -y && \
-    apt-get install -y --no-install-recommends python3.11 git curl wget && \
-    rm /usr/bin/python3 && \
-    ln -s /usr/bin/python3.11 /usr/bin/python3 && \
+    apt-get install -y --no-install-recommends python3.11 python3-pip python3.11-dev python3.11-distutils python3-wheel && \
+    rm /usr/bin/python3 && ln -s /usr/bin/python3.11 /usr/bin/python3 && \
     ln -s /usr/bin/python3 /usr/bin/python && \
-    apt-get install -y --no-install-recommends python3-pip python3.11-dev python3-wheel python3.11-distutils && \
+    # 
+    # Install pip and essential Python packages
     wget https://bootstrap.pypa.io/get-pip.py -O get-pip.py && \
-    # Install FastChat from source requires PEP 660 support
-    python3 get-pip.py && \
-    rm get-pip.py && \
+    python3 get-pip.py && rm get-pip.py && \
+    #
+    # Install Intel GPU OpenCL Driver and Compute Runtime
+    mkdir -p /tmp/neo && \
+    cd /tmp/neo && \
+    wget https://github.com/intel/intel-graphics-compiler/releases/download/v2.5.6/intel-igc-core-2_2.5.6+18417_amd64.deb && \
+    wget https://github.com/intel/intel-graphics-compiler/releases/download/v2.5.6/intel-igc-opencl-2_2.5.6+18417_amd64.deb && \
+    wget https://github.com/intel/compute-runtime/releases/download/24.52.32224.5/intel-level-zero-gpu-dbgsym_1.6.32224.5_amd64.ddeb && \
+    wget https://github.com/intel/compute-runtime/releases/download/24.52.32224.5/intel-level-zero-gpu_1.6.32224.5_amd64.deb && \
+    wget https://github.com/intel/compute-runtime/releases/download/24.52.32224.5/intel-opencl-icd-dbgsym_24.52.32224.5_amd64.ddeb && \
+    wget https://github.com/intel/compute-runtime/releases/download/24.52.32224.5/intel-opencl-icd_24.52.32224.5_amd64.deb && \
+    wget https://github.com/intel/compute-runtime/releases/download/24.52.32224.5/libigdgmm12_22.5.5_amd64.deb && \
+    dpkg -i *.deb && \
+    #
+    # Install Intel PyTorch extension for LLM inference
+    pip install --pre --upgrade 'ipex-llm[xpu_2.6]>=2.3.0b0,<2.3.0rc1' --extra-index-url https://download.pytorch.org/whl/xpu && \
+    pip install intel-extension-for-pytorch==2.6.10+xpu --extra-index-url=https://pytorch-extension.intel.com/release-whl/stable/xpu/cn/ && \
+    #
+    # Build torch-ccl
+    mkdir -p /build && \
+    cd /build && \
+    git clone https://github.com/intel/torch-ccl.git && \
+    cd torch-ccl && \
+    git checkout ccl_torch2.6.0+xpu && \
+    git submodule sync && \
+    git submodule update --init --recursive && \
+    # This patch will enable build torch-ccl with pytorch 2.6 environment
+    # git apply /tmp/ccl_torch.patch && \
+    USE_SYSTEM_ONECCL=ON COMPUTE_BACKEND=dpcpp python setup.py bdist_wheel && \
+    # File path: /build/torch-ccl/dist/oneccl_bind_pt-2.6.0+xpu-cp311-cp311-linux_x86_64.whl
+    # Build oneCCL
+    pip install ninja && \
+    cd /build/ && \
+    git clone https://github.com/analytics-zoo/oneCCL.git && \
+    cd oneCCL && \
+    git checkout 3afa1bb7936f57683a2503c34b29c0daca6a9ccb && \
+    git apply /build/1ccl_for_multi_arc.patch && \
+    mkdir build && \
+    cd build && \
+    cmake .. -GNinja -DCMAKE_C_COMPILER=icx -DCMAKE_CXX_COMPILER=icpx -DCMAKE_CXX_FLAGS="-fsycl" -DCOMPUTE_BACKEND=dpcpp  -DCMAKE_BUILD_TYPE=MinSizeRel && \
+    # File path: /build/oneCCL/build/src/libccl.so.1.0
+    ninja
+
+
+# Second stage: Final runtime image
+FROM intel/oneapi-basekit:2025.0.1-0-devel-ubuntu22.04
+
+# Copy the built torch-ccl package from the build stage
+COPY --from=build /build/torch-ccl/dist/oneccl_bind_pt-2.6.0+xpu-cp311-cp311-linux_x86_64.whl /opt/
+COPY --from=build /llm/ /llm/
+COPY --from=build /build/oneCCL/build/src/libccl.so.1.0 /opt/intel/1ccl-wks/lib/
+COPY --from=build /build/oneCCL/build/src/libccl.so.1 /opt/intel/1ccl-wks/lib/
+COPY --from=build /build/oneCCL/build/src/libccl.so /opt/intel/1ccl-wks/lib/
+COPY ./vllm_for_multi_arc.patch /llm/
+COPY ./setvars.sh /opt/intel/1ccl-wks/
+
+ARG http_proxy
+ARG https_proxy
+ARG PIP_NO_CACHE_DIR=false
+
+# Set environment variables
+ENV TZ=Asia/Shanghai PYTHONUNBUFFERED=1 VLLM_RPC_TIMEOUT=100000
+
+RUN set -eux && \
+    #
+    # Update and install basic dependencies, upgrade linux-libc-dev to fix CT7 CVEs
+    apt-get update && \
+    apt-get install -y --no-install-recommends \
+      linux-libc-dev \
+      curl wget git libunwind8-dev vim less gnupg gpg-agent software-properties-common \
+      libfabric-dev wrk libaio-dev numactl && \
+    # 
+    # Set timezone
+    ln -snf /usr/share/zoneinfo/$TZ /etc/localtime && \
+    echo $TZ > /etc/timezone && \
+    # 
+    # Install Python 3.11
+    add-apt-repository ppa:deadsnakes/ppa -y && \
+    apt-get install -y --no-install-recommends python3.11 python3-pip python3.11-dev python3.11-distutils python3-wheel && \
+    rm /usr/bin/python3 && ln -s /usr/bin/python3.11 /usr/bin/python3 && \
+    ln -s /usr/bin/python3 /usr/bin/python && \
+    # 
+    # Install pip and essential Python packages
+    wget https://bootstrap.pypa.io/get-pip.py -O get-pip.py && \
+    python3 get-pip.py && rm get-pip.py && \
     pip install --upgrade requests argparse urllib3 && \
-    pip install --pre --upgrade ipex-llm[xpu,serving] --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us/ && \
-    pip install transformers==4.36.2 && \
-    pip install transformers_stream_generator einops tiktoken && \
+    pip install --pre --upgrade 'ipex-llm[xpu_2.6]>=2.3.0b0,<2.3.0rc1' --extra-index-url https://download.pytorch.org/whl/xpu && \
+    pip install transformers==4.53.2 && \
+    pip install transformers_stream_generator einops tiktoken librosa && \
     pip install --upgrade colorama && \
-    # Download all-in-one benchmark and examples
-    git clone https://github.com/intel-analytics/ipex-llm && \
+    # 
+    git clone https://github.com/intel/ipex-llm.git && \
     cp -r ./ipex-llm/python/llm/dev/benchmark/ ./benchmark && \
     cp -r ./ipex-llm/python/llm/example/GPU/HuggingFace/LLM ./examples && \
+    cp -r ./ipex-llm/python/llm/example/GPU/vLLM-Serving/ ./vLLM-Serving && \
+    #
+    # Download pp_serving
+    mkdir -p /llm/pp_serving && \
+    cp ./ipex-llm/python/llm/example/GPU/Pipeline-Parallel-Serving/*.py /llm/pp_serving/ && \
+    #
+    # Download lightweight_serving
+    mkdir -p /llm/lightweight_serving && \
+    cp ./ipex-llm/python/llm/example/GPU/Lightweight-Serving/*.py /llm/lightweight_serving/ && \
+    rm -rf ./ipex-llm && \
+    #
     # Install vllm dependencies
     pip install --upgrade fastapi && \
     pip install --upgrade "uvicorn[standard]" && \
-    # Download vLLM-Serving
-    cp -r ./ipex-llm/python/llm/example/GPU/vLLM-Serving/ ./vLLM-Serving && \
-    rm -rf ./ipex-llm && \
+    pip install intel-extension-for-pytorch==2.6.10+xpu --extra-index-url=https://pytorch-extension.intel.com/release-whl/stable/xpu/cn/ && \
+    #
     # Install torch-ccl
-    cd /tmp/ && \
-    pip install torch==2.1.0.post2 torchvision==0.16.0.post2 torchaudio==2.1.0.post2 intel-extension-for-pytorch==2.1.30.post0 --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us/ && \
-    # Internal oneccl
-    wget https://sourceforge.net/projects/oneccl-wks/files/2024.0.0.3.1-release/oneccl_wks_installer_2024.0.0.3.1.sh && \
-    bash oneccl_wks_installer_2024.0.0.3.1.sh && \
-    git clone https://github.com/intel/torch-ccl -b v2.1.300+xpu && \
-    cd torch-ccl && \
-    patch -p1 < /tmp/oneccl-binding.patch && \
-    USE_SYSTEM_ONECCL=ON COMPUTE_BACKEND=dpcpp python setup.py install && \
+    pip install /opt/oneccl_bind_pt-2.6.0+xpu-cp311-cp311-linux_x86_64.whl && \
+    #
     apt-get update && \
     apt-get install -y --no-install-recommends libfabric-dev wrk libaio-dev numactl && \
-    # apt-get install -y intel-opencl-icd intel-level-zero-gpu=1.3.26241.33-647~22.04 level-zero level-zero-dev --allow-downgrades && \
+    # 
+    # Remove breaks install packages
+    apt-get remove -y libze-dev libze-intel-gpu1 && \
+    #
+    # Install compute runtime
     mkdir -p /tmp/neo && \
     cd /tmp/neo && \
-    wget https://github.com/intel/intel-graphics-compiler/releases/download/igc-1.0.15136.4/intel-igc-core_1.0.15136.4_amd64.deb && \
-    wget https://github.com/intel/intel-graphics-compiler/releases/download/igc-1.0.15136.4/intel-igc-opencl_1.0.15136.4_amd64.deb && \
-    wget https://github.com/intel/compute-runtime/releases/download/23.35.27191.9/intel-level-zero-gpu-dbgsym_1.3.27191.9_amd64.ddeb && \
-    wget https://github.com/intel/compute-runtime/releases/download/23.35.27191.9/intel-level-zero-gpu_1.3.27191.9_amd64.deb && \
-    wget https://github.com/intel/compute-runtime/releases/download/23.35.27191.9/intel-opencl-icd-dbgsym_23.35.27191.9_amd64.ddeb && \
-    wget https://github.com/intel/compute-runtime/releases/download/23.35.27191.9/intel-opencl-icd_23.35.27191.9_amd64.deb && \
-    wget https://github.com/intel/compute-runtime/releases/download/23.35.27191.9/libigdgmm12_22.3.11.ci17747749_amd64.deb && \
-    dpkg -i *.deb && \
-    rm -rf /tmp/neo && \
+    wget https://github.com/intel/intel-graphics-compiler/releases/download/v2.5.6/intel-igc-core-2_2.5.6+18417_amd64.deb && \
+    wget https://github.com/intel/intel-graphics-compiler/releases/download/v2.5.6/intel-igc-opencl-2_2.5.6+18417_amd64.deb && \
+    wget https://github.com/intel/compute-runtime/releases/download/24.52.32224.5/intel-level-zero-gpu-dbgsym_1.6.32224.5_amd64.ddeb && \
+    wget https://github.com/intel/compute-runtime/releases/download/24.52.32224.5/intel-level-zero-gpu_1.6.32224.5_amd64.deb && \
+    wget https://github.com/intel/compute-runtime/releases/download/24.52.32224.5/intel-opencl-icd-dbgsym_24.52.32224.5_amd64.ddeb && \
+    wget https://github.com/intel/compute-runtime/releases/download/24.52.32224.5/intel-opencl-icd_24.52.32224.5_amd64.deb && \
+    wget https://github.com/intel/compute-runtime/releases/download/24.52.32224.5/libigdgmm12_22.5.5_amd64.deb && \
+    dpkg -i *.deb && rm -rf /tmp/neo && \
     mkdir -p /llm && \
     cd /llm && \
-    git clone -b 0.5.4 https://github.com/analytics-zoo/vllm.git /llm/vllm && \
+    rm -rf /tmp/neo && \
+    # Install vllm
+    git clone -b v0.8.3 https://github.com/vllm-project/vllm /llm/vllm && \
     cd /llm/vllm && \
-    pip install -r /llm/vllm/requirements-xpu.txt && \
+    git apply /llm/vllm_for_multi_arc.patch && \
+    pip install setuptools-scm==8.2.0 setuptools==78.1.0 && \
+    pip install --upgrade cmake && \
+    pip install -v -r requirements/xpu.txt && \
     VLLM_TARGET_DEVICE=xpu python setup.py install && \
+    pip install intel-extension-for-pytorch==2.6.10+xpu --extra-index-url=https://pytorch-extension.intel.com/release-whl/stable/xpu/cn/ && \
+    pip uninstall -y oneccl oneccl-devel && \
+    rm -rf /llm/vllm_for_multi_arc.patch && \
     pip install mpi4py fastapi uvicorn openai && \
-    pip install gradio==4.43.0 && \
-    # patch /usr/local/lib/python3.11/dist-packages/fastchat/serve/gradio_web_server.py < /tmp/gradio_web_server.patch && \
-    pip install ray && \
-    patch /usr/local/lib/python3.11/dist-packages/fastchat/serve/gradio_web_server.py < /tmp/gradio_web_server.patch
+    pip install ray numba && \
+    # Re-enable sym_int4
+    sed -i 's/qtype = ggml_tensor_qtype\["woq_int4"\]/qtype = ggml_tensor_qtype["sym_int4"]/' /usr/local/lib/python3.11/dist-packages/ipex_llm/transformers/convert.py
 
-COPY ./vllm_online_benchmark.py        /llm/
-COPY ./vllm_offline_inference.py       /llm/
-COPY ./payload-1024.lua                /llm/
-COPY ./start-vllm-service.sh           /llm/
-COPY ./benchmark_vllm_throughput.py   /llm/
-COPY ./start-fastchat-service.sh       /llm/
-COPY ./start-pp_serving-service.sh       /llm/
-COPY ./start-lightweight_serving-service.sh       /llm/
-
-ENV LD_LIBRARY_PATH /usr/local/lib/python3.11/dist-packages/intel_extension_for_pytorch/lib/:/opt/intel/oneapi/tbb/2021.12/env/../lib/intel64/gcc4.8:/opt/intel/oneapi/mpi/2021.12/opt/mpi/libfabric/lib:/opt/intel/oneapi/mpi/2021.12/lib:/opt/intel/oneapi/mkl/2024.1/lib:/opt/intel/oneapi/ippcp/2021.11/lib/:/opt/intel/oneapi/ipp/2021.11/lib:/opt/intel/oneapi/dpl/2022.5/lib:/opt/intel/oneapi/dnnl/2024.1/lib:/opt/intel/oneapi/debugger/2024.1/opt/debugger/lib:/opt/intel/oneapi/dal/2024.2/lib:/opt/intel/oneapi/compiler/2024.1/opt/oclfpga/host/linux64/lib:/opt/intel/oneapi/compiler/2024.1/opt/compiler/lib:/opt/intel/oneapi/compiler/2024.1/lib:/opt/intel/oneapi/ccl/2021.12/lib/
+# Set environment variables to force use batch_forward_new()
+ENV IPEX_LLM_FORCE_BATCH_FORWARD=1
 
 WORKDIR /llm/
+ENTRYPOINT ["bash", "/llm/start-vllm-service.sh"]

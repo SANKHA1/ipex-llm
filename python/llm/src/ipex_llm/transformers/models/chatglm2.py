@@ -18,47 +18,19 @@
 #
 
 import os
-import math
 import torch
 from typing import Optional, Tuple
 from transformers.modeling_outputs import BaseModelOutputWithPast
-from ipex_llm.utils.common.log4Error import invalidInputError
-from ipex_llm.transformers.models.utils import restore_fp8_kv_cache, update_past_key_value
-from ipex_llm.transformers.models.utils import use_quantize_kv_cache, use_sdp, use_sdp_causal
+from ipex_llm.transformers.models.common import scaled_dot_product_attention
+from ipex_llm.transformers.models.utils import update_past_key_value
+from ipex_llm.transformers.models.utils import use_quantize_kv_cache
 from ipex_llm.transformers.models.utils import should_use_fuse_rope, apply_rotary_pos_emb
-from ipex_llm.transformers.models.utils import use_quantize_kv_cache, use_sdp, \
-    use_sdp_causal, should_use_compresskv, is_enough_kv_cache_room_4_36
+from ipex_llm.transformers.models.utils import mlp_fusion_check, SILU
+from ipex_llm.transformers.models.utils import use_quantize_kv_cache
+from ipex_llm.transformers.models.utils import should_use_compresskv, is_enough_kv_cache_room_4_36
 from ipex_llm.transformers.kv import DynamicCompressCache, DynamicCompressFp8Cache
 
 KV_CACHE_ALLOC_BLOCK_LENGTH = int(os.environ.get("KV_CACHE_ALLOC_BLOCK_LENGTH", 256))
-
-
-def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
-    """
-    This is the equivalent of torch.repeat_interleave(x, dim=1, repeats=n_rep). The hidden states
-    go from (batch, num_key_value_heads, seqlen, head_dim) to
-    (batch, num_attention_heads, seqlen, head_dim)
-    """
-    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
-    if n_rep == 1:
-        return hidden_states
-    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads,
-                                                           n_rep, slen, head_dim)
-    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
-
-
-def chatglm_rms_norm_forward(self, hidden_states):
-    if hidden_states.device.type == "xpu" and not (self.training and hidden_states.requires_grad):
-        import xe_addons
-        x_2d = hidden_states.reshape(-1, hidden_states.size(-1)).contiguous()
-        output = xe_addons.rms_norm(self.weight, x_2d, self.eps)
-        return output.reshape(hidden_states.shape)
-
-    input_dtype = hidden_states.dtype
-    hidden_states = hidden_states.to(torch.float32)
-    variance = hidden_states.pow(2).mean(-1, keepdim=True)
-    hidden_states = hidden_states * torch.rsqrt(variance + self.eps)
-    return self.weight * hidden_states.to(input_dtype)
 
 
 def chatglm2_model_forward(
@@ -91,8 +63,13 @@ def chatglm2_model_forward(
 
     if use_cache:
         use_compress_kv = should_use_compresskv(input_ids, input_ids.shape[1])
-        use_quantize_kv = use_quantize_kv_cache(self.encoder.layers[0].mlp.dense_h_to_4h,
-                                                input_ids)
+        n_heads = self.config.num_attention_heads
+        if self.config.multi_query_attention:
+            n_kv_heads = self.config.multi_query_group_num
+        else:
+            n_kv_heads = n_heads
+        use_quantize_kv = use_quantize_kv_cache(self.encoder.layers[0].mlp.gate_proj,
+                                                input_ids, n_heads, n_kv_heads)
         if use_compress_kv and not isinstance(past_key_values,
                                               DynamicCompressCache):
             if use_quantize_kv:
@@ -183,7 +160,7 @@ def chatglm2_encoder_forward(
     if not kv_caches and not use_compress_kv:
         kv_caches = [None for _ in range(self.num_layers)]
     presents = () if use_cache else None
-    if self.gradient_checkpointing and self.training:
+    if hasattr(self, "gradient_checkpointing") and self.gradient_checkpointing and self.training:
         use_cache = False
 
     all_self_attentions = None
@@ -193,7 +170,8 @@ def chatglm2_encoder_forward(
             all_hidden_states = all_hidden_states + (hidden_states,)
 
         layer = self._get_layer(index)
-        if self.gradient_checkpointing and self.training:
+        if hasattr(self, "gradient_checkpointing") and self.gradient_checkpointing \
+                and self.training:
             layer_ret = torch.utils.checkpoint.checkpoint(
                 layer,
                 hidden_states,
@@ -268,7 +246,7 @@ def chatglm2_attention_forward(
     # IPEX-LLM OPT: fuse rope
     inv_freq, position_ids = rotary_pos_emb
     rot_dim = inv_freq.size(-1) * 2
-    if should_use_fuse_rope(hidden_states, rotary_pos_emb[1], self.training):
+    if should_use_fuse_rope(hidden_states, position_ids, self.training):
         import xe_addons
         xe_addons.rotary_two_inplaced(inv_freq, position_ids,
                                       query_states[..., :rot_dim], key_states[..., :rot_dim])
@@ -284,8 +262,6 @@ def chatglm2_attention_forward(
         key_states[..., :rot_dim] = k_rot[...]
 
     # IPEX-LLM OPT: kv cache and quantize kv
-    use_quantize_kv = use_quantize_kv_cache(self.query_key_value, query_states)
-
     # [CompressKV]
     if use_compresskv:
         from transformers.configuration_utils import PretrainedConfig
@@ -299,6 +275,8 @@ def chatglm2_attention_forward(
             self.config, enough_kv_room, KV_CACHE_ALLOC_BLOCK_LENGTH
         )
     else:
+        use_quantize_kv = use_quantize_kv_cache(self.query_key_value, query_states,
+                                                n_head, n_kv_head)
         key_states, value_states = update_past_key_value(
             past_key_value, key_states, value_states,
             kv_seq_len, use_quantize_kv, hidden_states.device
@@ -308,53 +286,57 @@ def chatglm2_attention_forward(
                           value_states.permute(2, 0, 1, 3)) if use_cache else None
 
     # IPEX-LLM OPT: sdp
-    attn_weights = None
-    if use_sdp(q_len, kv_seq_len, head_dim, query_states):
-        import xe_addons
-        if use_compresskv and attention_mask is not None:
-            attention_mask = None
-        if use_quantize_kv:
-            attn_output = xe_addons.sdp_fp8(query_states, key_states, value_states, attention_mask)
-        else:
-            attn_output = xe_addons.sdp(query_states, key_states, value_states, attention_mask)
-    elif use_sdp_causal(q_len, kv_seq_len, head_dim, query_states, self.training):
-        import xe_addons
-        if use_quantize_kv:
-            attn_output = xe_addons.sdp_fp8_causal(query_states, key_states, value_states,
-                                                   attention_mask)
-        else:
-            attn_output = xe_addons.sdp_causal(query_states, key_states, value_states,
-                                               attention_mask)
-    elif query_states.device.type == "cpu":
-        # repeat k/v heads if n_kv_heads < n_heads
-        key_states = repeat_kv(key_states, n_head // n_kv_head)
-        value_states = repeat_kv(value_states, n_head // n_kv_head)
-        if q_len == kv_seq_len:
-            attn_output = torch.nn.functional.scaled_dot_product_attention(
-                query_states, key_states, value_states, is_causal=True
-            )
-        else:
-            attn_output = torch.nn.functional.scaled_dot_product_attention(
-                query_states, key_states, value_states, attention_mask
-            )
-    else:
-        if use_quantize_kv:
-            key_states, value_states = restore_fp8_kv_cache(key_states, value_states,
-                                                            query_states.dtype)
-        # repeat k/v heads if n_kv_heads < n_heads
-        key_states = repeat_kv(key_states, n_head // n_kv_head)
-        value_states = repeat_kv(value_states, n_head // n_kv_head)
-
-        attn_weights = torch.matmul(query_states,
-                                    key_states.transpose(2, 3)) / math.sqrt(head_dim)
-        if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask
-        attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1,
-                                                   dtype=torch.float32).to(value_states.dtype)
-        attn_output = torch.matmul(attn_weights, value_states)
+    attn_output = scaled_dot_product_attention(
+        query_states, key_states, value_states,
+        attention_mask, q_len == kv_seq_len
+    )
 
     # context_layer's shape: [bsz, n_head, seq_len, head_dim] -> [seq_len, bsz, n_head * head_dim]
     attn_output = attn_output.permute(2, 0, 1, 3).contiguous().view(q_len, bsz, n_head * head_dim)
     output = self.dense(attn_output)
 
     return output, past_key_value
+
+
+import torch.nn.functional as F
+
+
+def split_mlp(module: torch.nn.Module):
+    if module.__class__.__name__ == "MLP":
+        gate_weight, up_weight = module.dense_h_to_4h.weight.data.chunk(2, dim=0)
+
+        gate_proj = torch.nn.Linear(0, 0, bias=False)
+        gate_proj.weight = torch.nn.Parameter(gate_weight, requires_grad=False)
+        gate_proj.in_features = gate_weight.size(1)
+        gate_proj.out_features = gate_weight.size(0)
+
+        up_proj = torch.nn.Linear(0, 0, bias=False)
+        up_proj.weight = torch.nn.Parameter(up_weight, requires_grad=False)
+        up_proj.in_features = up_weight.size(1)
+        up_proj.out_features = up_weight.size(0)
+
+        module.gate_proj = gate_proj
+        module.up_proj = up_proj
+
+        module.activation_fn = F.silu
+
+        del module.dense_h_to_4h
+
+
+def mlp_forward(
+    self,
+    hidden_states: torch.FloatTensor
+) -> torch.FloatTensor:
+    x_2d = hidden_states.view(-1, hidden_states.shape[-1])
+    qtype = getattr(self.gate_proj, "qtype", None)
+    if mlp_fusion_check(x_2d, qtype, self.training):
+        x_2d = x_2d.contiguous()
+        import xe_linear
+        return self.dense_4h_to_h(xe_linear.mlp_forward_xpu(
+            x_2d, self.gate_proj.weight.data, self.up_proj.weight.data,
+            x_2d.shape[0], x_2d.shape[1], self.gate_proj.out_features,
+            SILU, qtype
+        ))
+    return self.dense_4h_to_h(
+        self.activation_fn(self.gate_proj(hidden_states)) * self.up_proj(hidden_states)
+    )

@@ -24,16 +24,15 @@ import torch
 import torch.utils.checkpoint
 from torch.nn import functional as F
 from transformers.modeling_outputs import BaseModelOutputWithPast
+from ipex_llm.transformers.models.common import scaled_dot_product_attention
 from ipex_llm.transformers.models.utils import use_quantize_kv_cache, restore_fp8_kv_cache, \
-    should_use_compresskv, get_compresskv_attn_mask
+    should_use_compresskv
 from ipex_llm.transformers.models.utils import update_past_key_value
 from ipex_llm.transformers.models.utils import should_use_fuse_rope
-from ipex_llm.transformers.models.utils import use_flash_attention, use_sdp, use_sdp_causal
-from ipex_llm.transformers.models.utils import apply_rotary_pos_emb, SILU
-from ipex_llm.transformers.models.utils import mlp_fusion_check
+from ipex_llm.transformers.models.utils import use_sdp
+from ipex_llm.transformers.models.utils import apply_rotary_pos_emb
 from ipex_llm.transformers.models.utils import is_enough_kv_cache_room_4_36
 from ipex_llm.transformers.kv import DynamicCompressFp8Cache, DynamicCompressCache
-from ipex_llm.transformers.models.utils import extend_kv_cache, append_kv_cache
 import warnings
 import os
 
@@ -45,38 +44,6 @@ def pre_compute_inv_freq(module: torch.nn.Module):
         inv_freq = module.inv_freq
         del module.inv_freq
         module.register_buffer("inv_freq", inv_freq, persistent=False)
-
-
-def baichuan_13b_rms_norm_forward(self, hidden_states):
-    if hidden_states.device.type == "xpu" and not (self.training or hidden_states.requires_grad):
-        import xe_addons
-        x_2d = hidden_states.reshape(-1, hidden_states.size(-1)).contiguous()
-        output = xe_addons.rms_norm(self.weight, x_2d, self.epsilon)
-        return output.reshape(hidden_states.shape)
-
-    input_dtype = hidden_states.dtype
-    hidden_states = hidden_states.to(torch.float32)
-    variance = hidden_states.pow(2).mean(-1, keepdim=True)
-    hidden_states = hidden_states * torch.rsqrt(variance + self.epsilon)
-    return self.weight * hidden_states.to(input_dtype)
-
-
-def baichuan_mlp_forward(
-    self,
-    x: torch.Tensor,
-) -> torch.Tensor:
-    x_2d = x.view(-1, x.shape[-1])
-    qtype = getattr(self.gate_proj, "qtype", None)
-    if mlp_fusion_check(x_2d, qtype, self.training) and not self.down_proj.enable_xetla:
-        import xe_linear
-        if not x_2d.is_contiguous():
-            x_2d = x_2d.contiguous()
-        return self.down_proj(xe_linear.mlp_forward_xpu(
-            x_2d, self.gate_proj.weight.data, self.up_proj.weight.data,
-            x_2d.shape[0], x_2d.shape[1], self.gate_proj.out_len,
-            SILU, qtype
-        ))
-    return self.down_proj(self.act_fn(self.gate_proj(x)) * self.up_proj(x))
 
 
 def baichuan_model_7b_forward(
@@ -105,7 +72,9 @@ def baichuan_model_7b_forward(
     if use_cache:
         inputs = input_ids if input_ids is not None else inputs_embeds
         use_compress_kv = should_use_compresskv(inputs, inputs.shape[1])
-        use_quantize_kv = use_quantize_kv_cache(self.layers[0].mlp.up_proj, inputs)
+        use_quantize_kv = use_quantize_kv_cache(self.layers[0].mlp.up_proj, inputs,
+                                                self.config.num_attention_heads,
+                                                self.config.num_attention_heads)
         if use_compress_kv and not isinstance(past_key_values,
                                               DynamicCompressCache):
             if use_quantize_kv:
@@ -278,8 +247,6 @@ def baichuan_attention_forward_7b(
         key_states = key_states.to(hidden_states.dtype)
 
     # IPEX-LLM OPT: kv cache and quantize kv
-    use_quantize_kv = use_quantize_kv_cache(self.W_pack, hidden_states)
-
     # [CompressKV]
     if use_compresskv:
         enough_kv_room = is_enough_kv_cache_room_4_36(past_key_value,
@@ -290,6 +257,8 @@ def baichuan_attention_forward_7b(
             query_states, attention_mask, 1,
             self.config, enough_kv_room, KV_CACHE_ALLOC_BLOCK_LENGTH)
     else:
+        use_quantize_kv = use_quantize_kv_cache(self.W_pack, hidden_states,
+                                                self.num_heads, self.num_heads)
         key_states, value_states = update_past_key_value(
             past_key_value, key_states, value_states,
             kv_seq_len, use_quantize_kv, device
@@ -301,42 +270,10 @@ def baichuan_attention_forward_7b(
 
     # IPEX-LLM OPT: sdp
     attn_weights = None
-    if not self.training and not hidden_states.requires_grad and \
-            use_flash_attention(query_states, key_states, attention_mask):
-        attn_output = F.scaled_dot_product_attention(query_states.to(dtype=torch.float16),
-                                                     key_states.to(dtype=torch.float16),
-                                                     value_states.to(dtype=torch.float16),
-                                                     is_causal=True).to(hidden_states.dtype)
-    elif use_sdp(q_len, kv_seq_len, self.head_dim, query_states):
-        import xe_addons
-        if use_compresskv:
-            attention_mask = get_compresskv_attn_mask(key_states, attention_mask)
-        if use_quantize_kv:
-            attn_output = xe_addons.sdp_fp8(query_states, key_states, value_states,
-                                            attention_mask)
-        else:
-            attn_output = xe_addons.sdp(query_states, key_states, value_states,
-                                        attention_mask)
-    elif use_sdp_causal(q_len, kv_seq_len, self.head_dim, query_states, self.training):
-        import xe_addons
-        if use_quantize_kv:
-            attn_output = xe_addons.sdp_fp8_causal(query_states, key_states,
-                                                   value_states, attention_mask)
-        else:
-            attn_output = xe_addons.sdp_causal(query_states, key_states,
-                                               value_states, attention_mask)
-    else:
-        if use_quantize_kv:
-            key_states, value_states = restore_fp8_kv_cache(key_states, value_states,
-                                                            query_states.dtype)
-        attn_weights = torch.matmul(query_states,
-                                    key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-        if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask
-        # upcast attention to fp32
-        attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1,
-                                                   dtype=torch.float32).to(value_states.dtype)
-        attn_output = torch.matmul(attn_weights, value_states)
+    attn_output = scaled_dot_product_attention(
+        query_states, key_states, value_states,
+        attention_mask, q_len == kv_seq_len
+    )
 
     attn_output = attn_output.transpose(1, 2).contiguous()
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
@@ -372,7 +309,8 @@ def baichuan_attention_forward_13b(
         kv_seq_len += past_key_value[0].shape[2]
 
     # IPEX-LLM OPT: kv cache and quantize kv
-    use_quantize_kv = use_quantize_kv_cache(self.W_pack, hidden_states)
+    use_quantize_kv = use_quantize_kv_cache(self.W_pack, hidden_states,
+                                            self.num_heads, self.num_heads)
     key_states, value_states = update_past_key_value(
         past_key_value, key_states, value_states,
         kv_seq_len, use_quantize_kv, device
@@ -388,14 +326,17 @@ def baichuan_attention_forward_13b(
         else:
             attention_mask = attention_mask[None, :, -q_len:, :]
 
+    head_dim = query_states.shape[-1]
+    scale = 1 / math.sqrt(head_dim)
+
     if use_sdp(q_len, kv_seq_len, self.head_dim, query_states):
         import xe_addons
         if use_quantize_kv:
             attn_output = xe_addons.sdp_fp8(query_states, key_states, value_states,
-                                            attention_mask)
+                                            attention_mask, scale)
         else:
             attn_output = xe_addons.sdp(query_states, key_states, value_states,
-                                        attention_mask)
+                                        attention_mask, scale)
         attn_weights = None
     else:
         if use_quantize_kv:

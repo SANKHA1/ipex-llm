@@ -37,36 +37,38 @@ if __name__ == "__main__":
         type=str,
         default="openbmb/MiniCPM-Llama3-V-2_5",
         help="The huggingface repo id for the MiniCPM-Llama3-V-2_5 model to be downloaded"
-        ", or the path to the huggingface checkpoint folder",
+        ", or the path to the huggingface checkpoint folder.",
     )
     parser.add_argument('--image-url-or-path', type=str,
                         default='http://farm6.staticflickr.com/5268/5602445367_3504763978_z.jpg',
                         help='The URL or path to the image to infer')
-    parser.add_argument('--prompt', type=str, default="What is in the image?",
+    parser.add_argument('--prompt', type=str, default="What is in this image?",
                         help='Prompt to infer')
-    parser.add_argument("--n-predict", type=int, default=32, help="Max tokens to predict")
-    parser.add_argument("--max-output-len", type=int, default=1024)
+    parser.add_argument("--n-predict", type=int, default=32, help="Max tokens to predict.")
+    parser.add_argument("--max-context-len", type=int, default=1024)
     parser.add_argument("--max-prompt-len", type=int, default=512)
-    parser.add_argument("--disable-transpose-value-cache", action="store_true", default=False)
-    parser.add_argument("--intra-pp", type=int, default=2)
-    parser.add_argument("--inter-pp", type=int, default=2)
+    parser.add_argument('--low-bit', type=str, default="sym_int4",
+                        help='Low bit optimizations that will be applied to the model.')
+    parser.add_argument("--save-directory", type=str,
+        required=True,
+        help="The path of folder to save converted model, "
+             "If path not exists, lowbit model will be saved there. "
+             "Else, lowbit model will be loaded.",
+    )
 
     args = parser.parse_args()
     model_path = args.repo_id_or_model_path
 
     model = AutoModelForCausalLM.from_pretrained(
         model_path,
-        torch_dtype=torch.float32,
+        torch_dtype=torch.float16,
         trust_remote_code=True,
         attn_implementation="eager",
-        load_in_low_bit="sym_int4",
+        load_in_low_bit=args.low_bit,
         optimize_model=True,
-        max_output_len=args.max_output_len,
+        max_context_len=args.max_context_len,
         max_prompt_len=args.max_prompt_len,
-        intra_pp=args.intra_pp,
-        inter_pp=args.inter_pp,
-        transpose_value_cache=not args.disable_transpose_value_cache,
-        modules_to_not_convert=['vpm', 'resampler']
+        save_directory=args.save_directory
     )
     tokenizer = AutoTokenizer.from_pretrained(model_path, trust_remote_code=True)
 

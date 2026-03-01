@@ -19,9 +19,9 @@ import torch
 import warnings
 from ipex_llm.utils.common import invalidInputError
 from ipex_llm.ggml.quantize import ggml_tensor_qtype
-from ipex_llm.transformers.utils import get_ipex_version, get_xpu_device_type
+from ipex_llm.transformers.utils import get_xpu_device_name
 from ipex_llm.transformers.low_bit_linear import SYM_INT4, SYM_INT8, FP8E5, IQ2_XXS, FP4, FP8E4,\
-    FP6, ASYM_INT4
+    FP6, ASYM_INT4, WOQ_INT4
 
 FP8_KV_ALLOC_LENGTH = 512
 KV_CACHE_ALLOC_BLOCK_LENGTH = int(os.environ.get("KV_CACHE_ALLOC_BLOCK_LENGTH", 256))
@@ -33,7 +33,7 @@ GELU = 1
 
 def decoding_fast_path_qtype_check(proj):
     qtype = getattr(proj, "qtype", None)
-    return qtype in [SYM_INT4, FP8E5, FP4]
+    return qtype in [SYM_INT4, FP8E5, FP4, WOQ_INT4]
 
 
 def init_kv_cache(batch_size, num_heads, head_dim, current_length, max_length, dtype, device):
@@ -74,7 +74,8 @@ def append_kv_cache(cache_k, cache_v, key_states, value_states):
     return new_cache_k, new_cache_v
 
 
-def use_quantize_kv_cache(linear: torch.nn.Module, x: torch.Tensor, kv_group: int = 1) -> bool:
+def use_quantize_kv_cache(linear: torch.nn.Module, x: torch.Tensor,
+                          num_heads: int, num_kv_heads: int) -> bool:
     if os.environ.get("BIGDL_QUANTIZE_KV_CACHE", None) is not None:
         warnings.warn(
             "`BIGDL_QUANTIZE_KV_CACHE` is deprecated and will be removed in future releases. "
@@ -85,16 +86,17 @@ def use_quantize_kv_cache(linear: torch.nn.Module, x: torch.Tensor, kv_group: in
         return os.environ["IPEX_LLM_QUANTIZE_KV_CACHE"] == "1"
     elif os.environ.get("IPEX_LLM_LOW_MEM", None) is not None:
         return os.environ["IPEX_LLM_LOW_MEM"] == "1"
+    elif linear.weight.dtype != torch.uint8:    # unquantized
+        return False
     else:
-        return x.device.type == 'xpu' and kv_cache_device_check(x, kv_group) \
-            and hasattr(linear, "qtype") and \
-            linear.qtype != ggml_tensor_qtype["fp16"] and linear.qtype != ggml_tensor_qtype["bf16"]
-
-
-def kv_cache_device_check(x: torch.Tensor, kv_group: int) -> bool:
-    return (get_xpu_device_type(x) == "mtl" and kv_group <= 1) or \
-        ((get_xpu_device_type(x) == "arc" or get_xpu_device_type(x) == "flex") and
-            1 < x.size(0) and x.size(0) <= 8)
+        device_name = get_xpu_device_name(x.device)
+        return (
+            num_kv_heads >= 4
+            and (
+                device_name in ["mtl", "lnl", "arl"] and num_heads // num_kv_heads <= 4
+                or device_name in ["arc", "bmg"] and x.size(0) > 1
+            )
+        )
 
 
 def init_fp8_kv_cache(batch_size, num_heads, current_length, head_dim, device):
@@ -127,6 +129,49 @@ def append_fp8_kv_cache(k_cache, v_cache, key, value):
     else:
         new_k_cache = k_cache.as_strided(new_size, k_cache.stride(), storage_offset=0)
         new_v_cache = v_cache.as_strided(new_size, v_cache.stride(), storage_offset=0)
+
+    import xe_addons
+    xe_addons.quantize_key_value(key, value,
+                                 new_k_cache[:, :, cur_length:new_length, :],
+                                 new_v_cache[:, :, cur_length:new_length, :])
+
+    return new_k_cache, new_v_cache
+
+
+def init_unbalanced_fp8_kv_cache(batch_size, num_heads, current_length,
+                                 k_head_dim, v_head_dim, device):
+    # for case which k head dim is different from v head dim
+    max_length = current_length + FP8_KV_ALLOC_LENGTH
+
+    k_cache_storage = torch.empty(batch_size, num_heads, max_length, k_head_dim,
+                                  dtype=torch.uint8, device=device)
+    k_cache = k_cache_storage.as_strided((batch_size, num_heads, 0, k_head_dim),
+                                         k_cache_storage.stride(), storage_offset=0)
+
+    v_cache_storage = torch.empty(batch_size, num_heads, max_length, v_head_dim,
+                                  dtype=torch.uint8, device=device)
+    v_cache = v_cache_storage.as_strided((batch_size, num_heads, 0, v_head_dim),
+                                         v_cache_storage.stride(), storage_offset=0)
+    return k_cache, v_cache
+
+
+def append_unbalanced_fp8_kv_cache(k_cache, v_cache, key, value):
+    batch_size, num_heads, cur_length, k_head_dim = k_cache.shape
+    _, _, _, v_head_dim = v_cache.shape
+    new_length = cur_length + key.size(2)
+    new_k_size = (batch_size, num_heads, new_length, k_head_dim)
+    new_v_size = (batch_size, num_heads, new_length, v_head_dim)
+
+    if k_cache.stride(1) < new_length * k_cache.size(3):
+        new_k_cache, new_v_cache = init_unbalanced_fp8_kv_cache(batch_size, num_heads, new_length,
+                                                                k_head_dim, v_head_dim, key.device)
+        new_k_cache = new_k_cache.as_strided(new_k_size, new_k_cache.stride(), storage_offset=0)
+        new_v_cache = new_v_cache.as_strided(new_v_size, new_v_cache.stride(), storage_offset=0)
+        new_k_cache[:, :, :cur_length, :] = k_cache
+        new_v_cache[:, :, :cur_length, :] = v_cache
+    else:
+        new_k_cache = k_cache.as_strided(new_k_size, k_cache.stride(), storage_offset=0)
+        new_v_cache = v_cache.as_strided(new_v_size, v_cache.stride(), storage_offset=0)
 
     import xe_addons
     xe_addons.quantize_key_value(key, value,
@@ -170,7 +215,7 @@ def should_use_fuse_rope(hidden_states, position_ids, training):
 
 def apply_rotary_pos_emb(q, k, cos, sin, position_ids, model_family):
     if model_family in ["llama", "baichuan", "internlm", "aquila", "gpt_neox", "mistral",
-                        "mixtral", "qwen2", "yuan", "stablelm", "qwen2_moe"]:
+                        "qwen2", "yuan", "stablelm", "qwen2_moe"]:
         # The first two dimensions of cos and sin are always 1, so we can `squeeze` them.
         cos = cos.squeeze(1).squeeze(0)  # [seq_len, dim]
         sin = sin.squeeze(1).squeeze(0)  # [seq_len, dim]
@@ -185,73 +230,13 @@ def apply_rotary_pos_emb(q, k, cos, sin, position_ids, model_family):
         q_embed = (q * cos) + (rotate_half(q) * sin)
         k_embed = (k * cos) + (rotate_half(k) * sin)
         return q_embed, k_embed
-    elif model_family in ["gptj", "chatglm"]:
+    elif model_family in ["chatglm"]:
         q_embed = (q * cos) + (rotate_every_two(q) * sin)
         k_embed = (k * cos) + (rotate_every_two(k) * sin)
         return q_embed, k_embed
     else:
         invalidInputError(False,
                           f"{model_family} is not supported.")
-
-
-def apply_ipex_rotate_every_two(q, k, cos, sin):
-    # ipex's apply_rotary_embedding_two_qk can change the origin storage,
-    # so q/k will get the result directly.
-    from ipex_llm.transformers.utils import get_ipex_version
-    if get_ipex_version() >= "2.1.10+xpu":
-        torch.ops.torch_ipex.apply_rotary_embedding_two_qk(
-            q, k, sin, cos, q, k
-        )
-    else:
-        torch.ops.torch_ipex.apply_rotary_embedding(q, sin, cos, q)
-        torch.ops.torch_ipex.apply_rotary_embedding(k, sin, cos, k)
-
-
-def apply_rotary_pos_emb_no_cache_xpu(q, k, position_ids, model_family, rope_theta=10000.0):
-    if q.device.type != "xpu":
-        invalidInputError(False,
-                          f"only xpu is supported in this function")
-    import xe_addons
-    q_embed = torch.empty(q.shape, dtype=q.dtype, device=q.device)
-    k_embed = torch.empty(k.shape, dtype=k.dtype, device=k.device)
-    if model_family in ["llama", "baichuan", "internlm", "aquila", "gpt_neox", "mistral",
-                        "mixtral"]:
-        xe_addons.apply_rotary_embedding_half_q_and_k(q, k, position_ids,
-                                                      q_embed, k_embed, rope_theta)
-        return q_embed, k_embed
-    else:
-        invalidInputError(False,
-                          f"{model_family} is not supported.")
-
-
-def apply_rotary_pos_emb_cache_freq_xpu(q, k, sin, cos, model_family, position_ids=None):
-    if q.device.type != "xpu":
-        invalidInputError(False,
-                          f"only xpu is supported in this function")
-    import xe_addons
-    q_embed = torch.empty(q.shape, dtype=q.dtype, device=q.device)
-    k_embed = torch.empty(k.shape, dtype=k.dtype, device=k.device)
-    if model_family in ["qwen", "mixtral"]:
-        xe_addons.apply_rotary_embedding_half_q_and_k_cache_freq(q, k, sin, cos,
-                                                                 q_embed, k_embed)
-    elif model_family in ["qwen2", "yuan", "stablelm", "qwen2_moe", "internlm"]:
-        cos = cos.to(q.dtype)
-        sin = sin.to(q.dtype)
-        cos = cos.squeeze(1).squeeze(0)  # [seq_len, dim]
-        sin = sin.squeeze(1).squeeze(0)  # [seq_len, dim]
-        cos = cos[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
-        sin = sin[position_ids].unsqueeze(1)  # [bs, 1, seq_len, dim]
-        xe_addons.apply_rotary_embedding_half_q_and_k_cache_freq(q, k, sin, cos,
-                                                                 q_embed, k_embed)
-    elif model_family in ["gemma", "phi3"]:
-        cos = cos.unsqueeze(1)
-        sin = sin.unsqueeze(1)
-        xe_addons.apply_rotary_embedding_half_q_and_k_cache_freq(q, k, sin, cos,
-                                                                 q_embed, k_embed)
-    else:
-        invalidInputError(False,
-                          f"{model_family} is not supported.")
-    return q_embed, k_embed
 
 
 def is_enough_kv_cache_room_4_36(past_key_value, idx, seq_len=1):
@@ -273,57 +258,6 @@ def is_enough_kv_cache_room_4_31(past_key_value, seq_len=1):
         (past_key_value[0].size(2) + seq_len) * past_key_value[0].size(3)
 
 
-def use_flash_attention(query, key, attention_mask=None):
-    # here we support query's shape is always [batch_size, head_num, q_len, head_dim],
-    # key's shape is always [batch_size, head_num, k_len, head_dim]
-    invalidInputError(query.dim() == 4,
-                      "Here query input of use_flash_attention should be [batch_size, "
-                      "head_num, q_len, head_dim]")
-    invalidInputError(key.dim() == 4,
-                      "Here key input of use_flash_attention should be [batch_size, "
-                      "head_num, k_len, head_dim]")
-    bsz, _, q_len, _ = query.size()
-    k_len = key.size()[2]
-    # check whether ipex flash attention can be used
-    if q_len != k_len:
-        # now only use flash attention for first token
-        # as it seems have no performance benifit for rest token now
-        return False
-    if query.device.type != "xpu":
-        # ipex flash attention only support for xpu
-        return False
-    ipex_version = get_ipex_version()
-    if ipex_version <= "2.0.110+xpu":
-        # ipex flash attention is supported from ipex 2.1
-        return False
-    if not torch.xpu.has_xetla():
-        # ipex flash attention is only supported for xetla
-        # may update this later
-        return False
-    elif get_xpu_device_type(query) != "pvc":
-        return False
-    if query.dtype not in [torch.float32, torch.float16]:
-        # only use flash attention for fp32/fp16 input
-        return False
-    if bsz > 1:
-        # as flash attention doesn't support attn_mask in ipex 2.1,
-        # so it will cause output error for padded batch input
-        if attention_mask is None:
-            return True
-        else:
-            # TODO: below logic may change for different model
-            # attention mask shape : [bsz, 1, q_len, k_len]
-            if attention_mask[0].squeeze()[0, 0].item() != 0:
-                # first batch contains padding
-                # otherwise we suppose it should be a upper triangular matrix
-                # at the same time, the diagonal is also 0
-                return False
-            elif not attention_mask.equal(attention_mask[0].repeat(bsz, 1, 1, 1)):
-                # check whether mask of every batch is the same
-                return False
-    return True
-
-
 def use_sdp(q_len, kv_len, head_dim, query_states):
     return (
         query_states.device.type == "xpu"
@@ -338,95 +272,43 @@ def use_sdp_causal(q_len, kv_len, head_dim, query_states, training):
     return (
         q_len == kv_len     # first token
         and head_dim in [-1, 64, 80, 96, 128]           # for now
-        and query_states.device.type == "xpu"   # GPU
+        and query_states.device.type == "xpu"           # GPU
         and query_states.dtype in [torch.float, torch.half]     # fp32/fp16
         and not query_states.requires_grad and not training     # not training
     )
 
 
+def use_sdp_non_causal(head_dim, device, dtype):
+    return (
+        head_dim in [64, 80, 128]
+        and device.type == "xpu"                # GPU
+        and dtype in [torch.float, torch.half]  # fp32/fp16
+    )
+
+
 def mlp_fusion_check(x, qtype, training):
-    invalidInputError(x.dim() == 2,
-                      "Here input x's dim should be 2.")
-    if x.shape[0] != 1:
+    if x.numel() // x.size(-1) != 1:
         return False
     if x.device.type != 'xpu':
         return False
-    if qtype not in [SYM_INT4, FP8E5, FP4, IQ2_XXS, FP6]:
+    if qtype not in [SYM_INT4, FP8E5, FP4, IQ2_XXS, FP6, WOQ_INT4]:
         return False
     if training or x.requires_grad:
         return False
     if qtype == FP6:
-        device = get_xpu_device_type(x)
-        if device == "mtl":
+        device = get_xpu_device_name(x.device)
+        if device in ["mtl", "lnl", "arl"]:
             return False
     return True
 
 
-def use_decoding_fast_path(proj,
-                           use_fuse_rope,
-                           enough_kv_room,
-                           bs,
-                           qtype_check=decoding_fast_path_qtype_check):
-    if proj is None:
-        return False
-    device = get_xpu_device_type(proj.weight)
-    if not qtype_check(proj):
-        return False
-    if not use_fuse_rope:
-        return False
-    if not enough_kv_room:
-        return False
-    if bs != 1:
-        return False
-    if proj.enable_xetla:
-        return False
-    if device in ["uhd"]:
-        return False
-    return True
-
-
-def use_xmx(x: torch.Tensor, qtype: int):
-    device = get_xpu_device_type(x)
-    return (
-        os.environ.get("BIGDL_LLM_XMX_DISABLED", "0") != "1"
-        and device in ["arc", "flex", "pvc"]
-        and qtype in [SYM_INT4, SYM_INT8, FP8E4, FP8E5]
-        and (
-            (device == "pvc" and 1 < x.size(0) <= 16)
-            or
-            (device != "pvc" and 1 < x.size(0) <= 64)
-        )
-    )
-
-
-def use_fused_layer_norm(x: torch.Tensor, training: bool):
-    device = get_xpu_device_type(x)
-    return (
-        not training
-        and not x.requires_grad
-        and device in ["arc", "flex", "pvc", "mtl"]  # fused layer norm cannot run on UHD
-        and x.numel() // x.size(-1) == 1  # fused layer norm is slower in first token
-    )
-
-
-def fp16_fusion_check(proj, x, training):
-    # only use fp16 fusion on PVC inference
-    if proj is None:
-        return False
-    if not hasattr(proj, "qtype"):
-        return False
-    if proj.qtype != ggml_tensor_qtype["fp16"]:
-        return False
-    if proj.weight_type != 2:
-        return False
-    if training:
-        return False
-    if x.requires_grad:
-        return False
-    device_type = get_xpu_device_type(x)
-    if device_type != "pvc":
-        return False
-    return True
+def repeat_kv(hidden_states: torch.Tensor, n_rep: int) -> torch.Tensor:
+    batch, num_key_value_heads, slen, head_dim = hidden_states.shape
+    if n_rep == 1:
+        return hidden_states
+    hidden_states = hidden_states[:, :, None, :, :].expand(batch, num_key_value_heads,
+                                                           n_rep, slen, head_dim)
+    return hidden_states.reshape(batch, num_key_value_heads * n_rep, slen, head_dim)
 
 
 def update_past_key_value(past_key_value, key_states, value_states,
@@ -483,7 +365,7 @@ def should_use_compresskv(x: torch.Tensor, prompt_len: int):
     else:
         if use_compress_kv is None:
             return (
-                get_xpu_device_type(x) == "mtl"
+                get_xpu_device_name(x.device) in ["mtl", "lnl", "arl"]
                 and prompt_len >= 1800
                 and prompt_len <= 4500
             )
@@ -504,3 +386,19 @@ def get_q_proj_or_qkv_proj(self):
     elif hasattr(self, "qkv_proj"):
         proj = self.qkv_proj
     return proj
+
+
+def make_cache_contiguous_inplaced(cos: torch.Tensor, sin: torch.Tensor):
+    if not cos.is_contiguous():
+        new_cos = cos.contiguous()
+        new_sin = sin.contiguous()
+        cos.set_(new_cos)
+        sin.set_(new_sin)
+
+
+def use_fuse_moe(hidden_states: torch.Tensor, qtype: int):
+    return (
+        hidden_states.device.type == "xpu"
+        and hidden_states.dtype in [torch.float, torch.half]
+        and qtype in [ggml_tensor_qtype["sym_int4"], ggml_tensor_qtype["woq_int4"]]
+    )

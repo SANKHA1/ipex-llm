@@ -13,11 +13,17 @@
 #### Setting Docker on windows
 Need to enable `--net=host`,follow [this guide](https://docs.docker.com/network/drivers/host/#docker-desktop) so that you can easily access the service running on the docker. The [v6.1x kernel version wsl]( https://learn.microsoft.com/en-us/community/content/wsl-user-msft-kernel-v6#1---building-the-microsoft-linux-kernel-v61x) is recommended to use.Otherwise, you may encounter the blocking issue before loading the model to GPU.
 
-### Pull the latest image
+### Build the Image
+To build the `ipex-llm-inference-cpp-xpu` Docker image, use the following command:
+
 ```bash
-# This image will be updated every day
-docker pull intelanalytics/ipex-llm-inference-cpp-xpu:latest
+docker build \
+  --build-arg http_proxy=.. \
+  --build-arg https_proxy=.. \
+  --build-arg no_proxy=.. \
+  --rm --no-cache -t intelanalytics/ipex-llm-inference-cpp-xpu:latest .
 ```
+
 
 ### Start Docker Container
 
@@ -154,12 +160,35 @@ Please refer to this [documentation](https://ipex-llm.readthedocs.io/en/latest/d
 
 ### Running Open WebUI with Intel GPU
 
-Start the ollama and load the model first, then use the open-webui to chat.
-If you have difficulty accessing the huggingface repositories, you may use a mirror, e.g. add export HF_ENDPOINT=https://hf-mirror.com before running bash start.sh.
+1. Start the ollama and load the model first, then use the open-webui to chat. If you have difficulty accessing the huggingface repositories, you may use a mirror, e.g. add export HF_ENDPOINT=<https://hf-mirror.com> and run following script to start open-webui docker.
+
 ```bash
-cd /llm/scripts/
-bash start-open-webui.sh
-# INFO:     Uvicorn running on http://0.0.0.0:8080 (Press CTRL+C to quit)
+export DOCKER_IMAGE=ghcr.io/open-webui/open-webui:main
+export CONTAINER_NAME=<YOUR-DOCKER-CONTAINER-NAME>
+
+docker rm -f $CONTAINER_NAME
+
+docker run -itd \
+            -v open-webui:/app/backend/data \
+            -e PORT=8080 \
+            --network=host \
+            --name $CONTAINER_NAME \
+            --restart always $DOCKER_IMAGE
 ```
 
-For how to log-in or other guide, Please refer to this [documentation](https://ipex-llm.readthedocs.io/en/latest/doc/LLM/Quickstart/open_webui_with_ollama_quickstart.html) for more details.
+2. Visit <http://localhost:8080> to use open-webui, the default ollama serve address in open-webui is `http://localhost:11434`, you can change it in connections on `http://localhost:8080/admin/settings`.
+
+Sample output:
+
+```bash
+INFO:     Started server process [1055]
+INFO:     Waiting for application startup.
+INFO:     Application startup complete.
+INFO:     Uvicorn running on http://0.0.0.0:8080 (Press CTRL+C to quit)
+```
+
+<a href="https://llm-assets.readthedocs.io/en/latest/_images/open_webui_signup.png" target="_blank">
+  <img src="https://llm-assets.readthedocs.io/en/latest/_images/open_webui_signup.png" width="100%" />
+</a>
+
+For how to log-in or other guide, Please refer to this [documentation](../Quickstart/open_webui_with_ollama_quickstart.md) for more details.

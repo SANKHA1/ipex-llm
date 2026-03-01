@@ -40,40 +40,20 @@ import math
 import torch
 import warnings
 
-from ipex_llm.transformers.models.utils import (
-    use_quantize_kv_cache, restore_fp8_kv_cache,
-    should_use_fuse_rope, use_sdp, use_sdp_causal
-)
+from ipex_llm.transformers.models.common import merge_qkv_base
+from ipex_llm.transformers.models.common import scaled_dot_product_attention
+from ipex_llm.transformers.models.utils import use_quantize_kv_cache, should_use_fuse_rope
 from ipex_llm.transformers.kv import DynamicFp8Cache, DynamicNormalCache
 from ipex_llm.utils.common.log4Error import invalidInputError
 
 from typing import Optional, Tuple, List
 from transformers.cache_utils import Cache
-from transformers.models.starcoder2.modeling_starcoder2 import repeat_kv, apply_rotary_pos_emb
+from transformers.models.starcoder2.modeling_starcoder2 import apply_rotary_pos_emb
 from transformers.models.starcoder2.modeling_starcoder2 import Starcoder2Model, Starcoder2Attention
 
 
 def merge_qkv(module: torch.nn.Module):
-    if isinstance(module, Starcoder2Attention):
-        new_weight = torch.cat([
-            module.q_proj.weight.data,
-            module.k_proj.weight.data,
-            module.v_proj.weight.data,
-        ], dim=0)
-        new_bias = torch.cat([
-            module.q_proj.bias.data,
-            module.k_proj.bias.data,
-            module.v_proj.bias.data,
-        ], dim=-1)
-
-        qkv_proj = torch.nn.Linear(0, 0, bias=True)
-        qkv_proj.weight = torch.nn.Parameter(new_weight, requires_grad=False)
-        qkv_proj.bias = torch.nn.Parameter(new_bias, requires_grad=False)
-        qkv_proj.in_features = new_weight.size(1)
-        qkv_proj.out_features = new_weight.size(0)
-        module.qkv_proj = qkv_proj
-
-        del module.q_proj, module.k_proj, module.v_proj
+    merge_qkv_base(module, Starcoder2Attention)
 
 
 def attention_forward(
@@ -121,42 +101,11 @@ def attention_forward(
                                                      self.layer_idx, None)
 
     # IPEX-LLM OPT: sdp
-    if use_sdp(q_len, kv_seq_len, self.head_dim, query_states):
-        import xe_addons
-        if isinstance(past_key_value, DynamicFp8Cache):
-            attn_output = xe_addons.sdp_fp8(query_states, key_states, value_states,
-                                            attention_mask)
-        else:
-            attn_output = xe_addons.sdp(query_states, key_states, value_states,
-                                        attention_mask)
-    elif use_sdp_causal(q_len, kv_seq_len, self.head_dim, query_states, self.training):
-        import xe_addons
-        if isinstance(past_key_value, DynamicFp8Cache):
-            attn_output = xe_addons.sdp_fp8_causal(query_states, key_states,
-                                                   value_states, attention_mask)
-        else:
-            attn_output = xe_addons.sdp_causal(query_states, key_states,
-                                               value_states, attention_mask)
-    else:
-        if isinstance(past_key_value, DynamicFp8Cache):
-            key_states, value_states = restore_fp8_kv_cache(key_states, value_states,
-                                                            query_states.dtype)
-        # repeat k/v heads if n_kv_heads < n_heads
-        key_states = repeat_kv(key_states, self.num_key_value_groups)
-        value_states = repeat_kv(value_states, self.num_key_value_groups)
-
-        attn_weights = torch.matmul(query_states,
-                                    key_states.transpose(2, 3)) / math.sqrt(self.head_dim)
-
-        if attention_mask is not None:
-            attn_weights = attn_weights + attention_mask
-
-        # upcast attention to fp32
-        attn_weights = torch.nn.functional.softmax(attn_weights, dim=-1,
-                                                   dtype=torch.float32).to(query_states.dtype)
-        attn_weights = torch.nn.functional.dropout(attn_weights, p=self.attention_dropout,
-                                                   training=self.training)
-        attn_output = torch.matmul(attn_weights, value_states)
+    attn_weights = None
+    attn_output = scaled_dot_product_attention(
+        query_states, key_states, value_states,
+        attention_mask, q_len == kv_seq_len
+    )
 
     attn_output = attn_output.transpose(1, 2).contiguous()
     attn_output = attn_output.reshape(bsz, q_len, self.hidden_size)
@@ -183,7 +132,9 @@ def model_forward(
     return_dict: Optional[bool] = None,
 ):
     use_cache = use_cache if use_cache is not None else self.config.use_cache
-    use_quantize_kv = use_quantize_kv_cache(self.layers[0].mlp.c_fc, input_ids)
+    num_heads, num_kv_heads = self.config.num_attention_heads, self.config.num_key_value_heads
+    use_quantize_kv = use_quantize_kv_cache(self.layers[0].mlp.c_fc, input_ids,
+                                            num_heads, num_kv_heads)
     if use_cache:
         if use_quantize_kv and not isinstance(past_key_values, DynamicFp8Cache):
             past_key_values = DynamicFp8Cache.from_legacy_cache(past_key_values)

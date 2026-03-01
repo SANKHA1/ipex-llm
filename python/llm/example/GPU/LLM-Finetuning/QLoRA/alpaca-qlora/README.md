@@ -10,19 +10,23 @@ To run this example with IPEX-LLM on Intel GPUs, we have some recommended requir
 
 ### 1. Install
 
+For Gemma-2B, directly start from [here](README.md#3-qlora-finetune).
+
 ```bash
 conda create -n llm python=3.11
 conda activate llm
 # below command will install intel_extension_for_pytorch==2.1.10+xpu as default
 pip install --pre --upgrade ipex-llm[xpu] --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us/
-pip install transformers==4.36.0 datasets
-pip install fire peft==0.10.0
-pip install oneccl_bind_pt==2.1.100 --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us/ # necessary to run distributed finetuning
+pip install transformers==4.36.1 datasets
+pip install fire peft==0.10.0 accelerate==0.23.0
+pip install oneccl_bind_pt==2.1.100 --index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us/ # necessary to run distributed finetuning
 pip install bitsandbytes scipy
 # configures OneAPI environment variables
 source /opt/intel/oneapi/setvars.sh # necessary to run before installing deepspeed
 pip install git+https://github.com/microsoft/DeepSpeed.git@78c518e
 pip install git+https://github.com/intel/intel-extension-for-deepspeed.git@ec33277
+# (optional) install mpirun to run multi-card finetuning
+sudo apt install openmpi-bin
 ```
 
 ### 2. Configures OneAPI environment variables
@@ -165,6 +169,35 @@ pip install transformers==4.37.0
 
 ```bash
 bash qlora_finetune_qwen15_7b_arc_1_card.sh
+```
+
+</details>
+
+<details>
+  <summary> Show Gemma-2B example </summary>
+
+##### 1. Install
+
+```bash
+conda create -n llm python=3.11
+conda activate llm
+# below command will install intel_extension_for_pytorch==2.1.10+xpu as default
+pip install --pre --upgrade ipex-llm[xpu] --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us/
+pip install datasets
+pip install transformers==4.38.1
+pip install accelerate==0.27.2
+pip install bitsandbytes==0.45.3
+```
+##### 2. Configures OneAPI environment variables
+
+```bash
+source /opt/intel/oneapi/setvars.sh
+```
+
+##### 3. Run on A770
+
+```bash
+bash qlora_finetune_gemma_2b_arc_1_card.sh
 ```
 
 </details>

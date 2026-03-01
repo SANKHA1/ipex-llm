@@ -17,21 +17,32 @@
 
 from diffusers import AutoPipelineForText2Image
 import torch
-import ipex_llm
+from ipex_llm import optimize_model
 import numpy as np
 from PIL import Image
 import argparse
+import time
 
 
 def main(args):
     pipeline_text2image = AutoPipelineForText2Image.from_pretrained(
         args.repo_id_or_model_path, 
-        torch_dtype=torch.bfloat16, 
+        torch_dtype=torch.float16, 
         use_safetensors=True
-    ).to("xpu")
+    )
+    pipeline_text2image = optimize_model(pipeline_text2image, low_bit=None)
+    pipeline_text2image.to("xpu")
 
-    image = pipeline_text2image(prompt=args.prompt,num_inference_steps=args.num_steps).images[0]
-    image.save(args.save_path)
+    with torch.inference_mode():
+        # warmup
+        image = pipeline_text2image(prompt=args.prompt,num_inference_steps=args.num_steps).images[0]
+
+        # start inference
+        st = time.time()
+        image = pipeline_text2image(prompt=args.prompt,num_inference_steps=args.num_steps).images[0]
+        end = time.time()
+        print(f'Inference time: {end-st} s')
+        image.save(args.save_path)
 
 if __name__=="__main__":
     parser = argparse.ArgumentParser(description="Stable Diffusion")

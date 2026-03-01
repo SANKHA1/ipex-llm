@@ -2,12 +2,12 @@
 
 ## Windows
 
+> [!NOTE]
+> For installation with PyTorch 2.6, please refer to this [guide](../Quickstart/install_pytorch26_gpu.md) for more information.
+
 ### Prerequisites
 
 IPEX-LLM on Windows supports Intel iGPU and dGPU.
-
-> [!IMPORTANT]
-> IPEX-LLM on Windows only supports PyTorch 2.1.
 
 To apply Intel GPU acceleration, please first verify your GPU driver version.
 
@@ -44,7 +44,9 @@ We recommend using [Miniforge](https://conda-forge.org/download/) to create a py
 > [!IMPORTANT]
 > ``ipex-llm`` is tested with Python 3.9, 3.10 and 3.11. Python 3.11 is recommended for best practices.
 
-The easiest ways to install `ipex-llm` is the following commands, choosing either US or CN website for `extra-index-url`:
+The easiest ways to install `ipex-llm` is the following commands.
+
+Choose either US or CN website for `extra-index-url`:
 
 - For **US**:
 
@@ -102,13 +104,7 @@ call "C:\Program Files (x86)\Intel\oneAPI\setvars.bat"
 
 Please also set the following environment variable if you would like to run LLMs on: -->
 
-- For **Intel iGPU**:
-   ```cmd
-   set SYCL_CACHE_PERSISTENT=1
-   set BIGDL_LLM_XMX_DISABLED=1
-   ```
-
-- For **Intel Arc™ A-Series Graphics**:
+- For **Intel iGPU** and **Intel Arc™ A-Series Graphics**:
    ```cmd
    set SYCL_CACHE_PERSISTENT=1
    ```
@@ -121,13 +117,7 @@ Please also set the following environment variable if you would like to run LLMs
 
 #### 1. Error loading `intel_extension_for_pytorch`
 
-If you met error when importing `intel_extension_for_pytorch`, please ensure that you have completed the following steps:
-
-* Ensure that you have installed Visual Studio with "Desktop development with C++" workload.
-
-* Make sure that the correct version of oneAPI, specifically 2024.0, is installed.
-
-* Ensure that `libuv` is installed in your conda environment. This can be done during the creation of the environment with the command:
+If you met error when importing `intel_extension_for_pytorch`, please ensure that `libuv` is installed in your conda environment. This can be done during the creation of the environment with the command:
   ```cmd
   conda create -n llm python=3.11 libuv
   ```
@@ -136,13 +126,10 @@ If you met error when importing `intel_extension_for_pytorch`, please ensure tha
   conda install libuv
   ```
 
-<!-- * For oneAPI installed using the Offline installer, make sure you have configured oneAPI environment variables in your Miniforge Prompt through
-  ```cmd
-  call "C:\Program Files (x86)\Intel\oneAPI\setvars.bat"
-  ```
-  Please note that you need to set these environment variables again once you have a new Miniforge Prompt window. -->
-
 ## Linux
+
+> [!NOTE]
+> For installation with PyTorch 2.6, please refer to this [guide](../Quickstart/install_pytorch26_gpu.md) for more information.
 
 ### Prerequisites
 
@@ -151,8 +138,12 @@ IPEX-LLM GPU support on Linux has been verified on:
 * Intel Arc™ A-Series Graphics
 * Intel Data Center GPU Flex Series
 * Intel Data Center GPU Max Series
+* Intel iGPU
 
 > [!IMPORTANT]
+> For prerequisite installation on Intel Core™ Ultra Processors (Series 1) with processor number 1xxH/U/HL/UL (code name Meteor Lake), please refer to [this guide](../Quickstart/install_linux_gpu.md#install-prerequisites).
+
+> [!Note]
 > IPEX-LLM on Linux supports PyTorch 2.0 and PyTorch 2.1.
 > 
 > **Warning**
@@ -174,29 +165,6 @@ IPEX-LLM GPU support on Linux has been verified on:
       > For client GPUs, such as the Intel® Arc™ A-series, please refer to [Client GPU Installation Guide](https://dgpu-docs.intel.com/driver/client/overview.html). For data center GPUs, including Intel® Data Center GPU Max Series and Intel® Data Center GPU Flex Series, please refer to our [Installation for Data Center GPU](https://dgpu-docs.intel.com/driver/installation.html) for general purpose GPU capabilities.
       >
       > See [release page](https://dgpu-docs.intel.com/releases/index.html) for latest version.
-
-      > **Note**:
-      >
-      > For Intel Core™ Ultra integrated GPU, please make sure level_zero version >= 1.3.28717. The level_zero version can be checked with ``sycl-ls``, and verison will be tagged be ``[ext_oneapi_level_zero:gpu]``.         
-      > ```
-      > [opencl:acc:0] Intel(R) FPGA Emulation Platform for OpenCL(TM), Intel(R) FPGA Emulation Device OpenCL 1.2  [2023.16.12.0.12_195853.xmain-hotfix]
-      > [opencl:cpu:1] Intel(R) OpenCL, Intel(R) Core(TM) Ultra 5 125H OpenCL 3.0 (Build 0) [2023.16.12.0.12_195853.xmain-hotfix]
-      > [opencl:gpu:2] Intel(R) OpenCL Graphics, Intel(R) Arc(TM) Graphics OpenCL 3.0 NEO  [24.09.28717.12]
-      > [ext_oneapi_level_zero:gpu:0] Intel(R) Level-Zero, Intel(R) Arc(TM) Graphics 1.3 [1.3.28717]
-      > ```
-      >
-      > If you have level_zero version < 1.3.28717, you could update as follows:
-      >
-      > ```bash
-      > wget https://github.com/intel/intel-graphics-compiler/releases/download/igc-1.0.16238.4/intel-igc-core_1.0.16238.4_amd64.deb
-      > wget https://github.com/intel/intel-graphics-compiler/releases/download/igc-1.0.16238.4/intel-igc-opencl_1.0.16238.4_amd64.deb
-      > wget https://github.com/intel/compute-runtime/releases/download/24.09.28717.12/intel-level-zero-gpu-dbgsym_1.3.28717.12_amd64.ddeb
-      > wget https://github.com/intel/compute-runtime/releases/download/24.09.28717.12/intel-level-zero-gpu_1.3.28717.12_amd64.deb
-      > wget https://github.com/intel/compute-runtime/releases/download/24.09.28717.12/intel-opencl-icd-dbgsym_24.09.28717.12_amd64.ddeb
-      > wget https://github.com/intel/compute-runtime/releases/download/24.09.28717.12/intel-opencl-icd_24.09.28717.12_amd64.deb
-      > wget https://github.com/intel/compute-runtime/releases/download/24.09.28717.12/libigdgmm12_22.3.17_amd64.deb
-      > sudo dpkg -i *.deb
-      > ```
 
    - Step 2: Download and install [Intel® oneAPI Base Toolkit](https://www.intel.com/content/www/us/en/developer/tools/oneapi/base-toolkit-download.html) with version 2024.0. OneDNN, OneMKL and DPC++ compiler are needed, others are optional.
 
@@ -439,7 +407,7 @@ We recommend using [Miniforge](https://conda-forge.org/download/) to create a py
       > The ``xpu`` option will install IPEX-LLM with PyTorch 2.1 by default, which is equivalent to
       >
       > ```bash
-      > pip install --pre --upgrade ipex-llm[xpu_2.1] --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/> xpu/us/
+      > pip install --pre --upgrade ipex-llm[xpu_2.1] --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us/
       > ```
 
    - For **CN**:
@@ -456,7 +424,7 @@ We recommend using [Miniforge](https://conda-forge.org/download/) to create a py
       > The ``xpu`` option will install IPEX-LLM with PyTorch 2.1 by default, which is equivalent to
       >
       > ```bash
-      > pip install --pre --upgrade ipex-llm[xpu_2.1] --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/> xpu/cn/
+      > pip install --pre --upgrade ipex-llm[xpu_2.1] --extra-index-url https://pytorch-extension.intel.com/release-whl/stable/xpu/us/
       > ```
 
 - For **PyTorch 2.0** (deprecated for versions ``ipex-llm >= 2.1.0b20240511``):
@@ -579,7 +547,6 @@ To use GPU acceleration on Linux, several environment variables are required or 
       source /opt/intel/oneapi/setvars.sh
 
       export SYCL_CACHE_PERSISTENT=1
-      export BIGDL_LLM_XMX_DISABLED=1
       ```
 
 > [!NOTE]
